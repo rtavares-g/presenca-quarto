@@ -1,0 +1,23 @@
+[Unit]
+Description=Sensor de presenca mmWave (C4001 + Sinric Pro)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=raspberry
+Group=raspberry
+SupplementaryGroups=gpio
+
+WorkingDirectory=/home/raspberry/presenca-quarto
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/home/raspberry/presenca-quarto/venv/bin/python /home/raspberry/presenca-quarto/presenca_quarto.py
+
+Restart=always
+RestartSec=5
+
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
