@@ -1,5 +1,5 @@
 aiohttp>=3.9
-websockets>=12.0
 gpiozero>=2.0
+sinricpro>=6.0.0,<7
 # lgpio vem do pacote do sistema (python3-lgpio via apt), nao daqui -
 # o venv precisa ser criado com --system-site-packages para enxergar

@@ -2,16 +2,13 @@
 """
 Sensor de presença mmWave (C4001 25m) - Raspberry Pi + Sinric Pro
 Lê o pino digital OUT do sensor e envia eventos de movimento (motion) para
-a Sinric Pro, com um pequeno painel web e console remoto para depuração.
+a Sinric Pro (SDK oficial `sinricpro`), com um pequeno painel web e console
+remoto para depuração.
 """
 
 from __future__ import annotations
 
 import asyncio
-import base64
-import glob
-import hashlib
-import hmac
 import json
 import os
 import socket
@@ -22,37 +19,64 @@ from datetime import datetime
 from pathlib import Path
 
 from aiohttp import web
-import websockets
 from gpiozero import DigitalInputDevice
+from sinricpro import SinricPro, SinricProConfig, SinricProMotionSensor
 
 # =========================================================================
 # CONFIGURACAO
 # =========================================================================
 
 RAIZ = Path(__file__).resolve().parent
-ARQUIVO_CONFIG = Path(os.environ.get("PRESENCA_CONFIG", RAIZ / "config.json"))
 
-PADROES = {
-    "out_gpio": 27,
-    "out_ativo_alto": True,
-    "atraso_ausencia_seg": 3.0,
-    "porta_web": 8081,
-    "sinric": {
-        "device_id": "",
-        "app_key": "",
-        "app_secret": "",
-    },
-}
 
-try:
-    with open(ARQUIVO_CONFIG) as f:
-        CFG = {**PADROES, **json.load(f)}
-except FileNotFoundError:
-    CFG = PADROES
-except json.JSONDecodeError as e:
-    print(f"ERRO: config.json inválido - {e}")
-    print(f"Delete {ARQUIVO_CONFIG} ou corrija o JSON")
-    sys.exit(1)
+def carregar_env(caminho: Path) -> None:
+    """Lê o .env sem depender de biblioteca externa.
+
+    Variáveis já presentes no ambiente vencem o arquivo, para o systemd
+    poder sobrescrever qualquer coisa sem editar o .env.
+    """
+    if not caminho.is_file():
+        return
+    for linha in caminho.read_text(encoding="utf-8").splitlines():
+        linha = linha.strip()
+        if not linha or linha.startswith("#") or "=" not in linha:
+            continue
+        chave, _, valor = linha.partition("=")
+        chave = chave.strip()
+        valor = valor.strip().strip('"').strip("'")
+        if chave and chave not in os.environ:
+            os.environ[chave] = valor
+
+
+def env_int(nome: str, padrao: int) -> int:
+    try:
+        return int(os.environ.get(nome, padrao))
+    except ValueError:
+        return padrao
+
+
+def env_float(nome: str, padrao: float) -> float:
+    try:
+        return float(os.environ.get(nome, padrao))
+    except ValueError:
+        return padrao
+
+
+def env_bool(nome: str, padrao: bool) -> bool:
+    return os.environ.get(nome, "1" if padrao else "0").lower() in ("1", "true", "sim", "yes")
+
+
+carregar_env(Path(os.environ.get("PRESENCA_ENV", RAIZ / ".env")))
+
+OUT_GPIO = env_int("OUT_GPIO", 27)
+OUT_ATIVO_ALTO = env_bool("OUT_ATIVO_ALTO", True)
+ATRASO_AUSENCIA_SEG = env_float("ATRASO_AUSENCIA_SEG", 3.0)
+PORTA_WEB = env_int("PORTA_WEB", 8081)
+
+SINRIC_DEVICE_ID = os.environ.get("SINRIC_DEVICE_ID", "")
+SINRIC_APP_KEY = os.environ.get("SINRIC_APP_KEY", "")
+SINRIC_APP_SECRET = os.environ.get("SINRIC_APP_SECRET", "")
+SINRIC_DEBUG = env_bool("SINRIC_DEBUG", False)
 
 # =========================================================================
 # LOGGING - Console remoto
@@ -155,119 +179,62 @@ class LeitorSimulado:
 def montar_leitor(simular: bool):
     if simular:
         return LeitorSimulado()
-    return LeitorPresenca(CFG["out_gpio"], CFG["out_ativo_alto"])
+    return LeitorPresenca(OUT_GPIO, OUT_ATIVO_ALTO)
 
 # =========================================================================
 # SINRIC PRO (capacidade Motion Sensor)
 # =========================================================================
 
 class Sinric:
-    """Conexão WebSocket para Sinric Pro (capacidade Motion Sensor)."""
+    """Publica o estado de presença na Sinric Pro via SDK oficial (sinricpro)."""
     def __init__(self) -> None:
-        self.ws = None
-        self.conectado = False
+        self.sensor: SinricProMotionSensor | None = None
 
     @property
     def configurado(self) -> bool:
-        return bool(CFG["sinric"]["device_id"] and CFG["sinric"]["app_key"])
+        return bool(SINRIC_DEVICE_ID and SINRIC_APP_KEY and SINRIC_APP_SECRET)
 
-    def assinar(self, payload: str) -> str:
-        digest = hmac.new(
-            CFG["sinric"]["app_secret"].encode(),
-            payload.encode(), hashlib.sha256
-        ).digest()
-        return base64.b64encode(digest).decode()
-
-    def montar_evento(self, ativo: bool) -> str:
-        valor = "detected" if ativo else "notDetected"
-        ts = int(time.time())
-        payload = (
-            '{"action":"motion",'
-            '"cause":{"type":"PHYSICAL_INTERACTION"},'
-            f'"createdAt":{ts},'
-            f'"deviceId":"{CFG["sinric"]["device_id"]}",'
-            '"replyToken":"raspberry",'
-            '"type":"event",'
-            f'"value":{{"state":"{valor}"}}}}'
-        )
-        return (
-            '{"header":{"payloadVersion":2,"signatureVersion":1},'
-            f'"payload":{payload},'
-            f'"signature":{{"HMAC":"{self.assinar(payload)}"}}}}'
-        )
-
-    def _cabecalhos(self) -> dict[str, str]:
-        mac = "00:00:00:00:00:00"
-        try:
-            for caminho in sorted(glob.glob("/sys/class/net/*/address")):
-                if "/lo/" not in caminho:
-                    mac = Path(caminho).read_text().strip()
-                    break
-        except Exception:
-            pass
-        return {
-            "appkey": CFG["sinric"]["app_key"],
-            "deviceids": CFG["sinric"]["device_id"],
-            "restoredevicestates": "false",
-            "ip": socket.gethostbyname(socket.gethostname()),
-            "mac": mac,
-            "platform": "RaspberryPi",
-            "SDKVersion": "Py-Motion-1.0",
-        }
-
-    async def _abrir(self):
-        url = "wss://ws.sinric.pro/"
-        cabecalhos = self._cabecalhos()
-        try:
-            return await websockets.connect(
-                url, additional_headers=cabecalhos,
-                subprotocols=["arduino"], ping_interval=30, ping_timeout=20,
-            )
-        except TypeError:
-            return await websockets.connect(
-                url, extra_headers=cabecalhos,
-                subprotocols=["arduino"], ping_interval=30, ping_timeout=20,
-            )
-
-    async def tarefa(self) -> None:
+    async def iniciar(self) -> None:
         if not self.configurado:
             log("SINRIC: credenciais não configuradas")
             return
 
-        while True:
-            try:
-                log("SINRIC: conectando...")
-                async with await self._abrir() as ws:
-                    self.ws = ws
-                    self.conectado = True
-                    estado.sinric_ok = True
-                    log("SINRIC: conectado")
+        self.sensor = SinricProMotionSensor(SINRIC_DEVICE_ID)
 
-                    # sincroniza o estado atual assim que reconecta
-                    await self.enviar_presenca(estado.presenca)
+        sinric_pro = SinricPro.get_instance()
+        sinric_pro.on_connected(self._ao_conectar)
+        sinric_pro.on_disconnected(self._ao_desconectar)
+        sinric_pro.add(self.sensor)
 
-                    async for bruto in ws:
-                        pass  # nenhuma acao remota esperada para este dispositivo
+        log("SINRIC: conectando...")
+        await sinric_pro.begin(SinricProConfig(
+            app_key=SINRIC_APP_KEY,
+            app_secret=SINRIC_APP_SECRET,
+            debug=SINRIC_DEBUG,
+        ))
 
-            except Exception as erro:
-                log(f"SINRIC: desconectado ({type(erro).__name__})")
+    def _ao_conectar(self) -> None:
+        estado.sinric_ok = True
+        log("SINRIC: conectado")
+        # sincroniza o estado atual assim que (re)conecta
+        asyncio.get_running_loop().create_task(self.enviar_presenca(estado.presenca))
 
-            self.ws = None
-            self.conectado = False
-            estado.sinric_ok = False
-            await asyncio.sleep(10)
+    def _ao_desconectar(self) -> None:
+        estado.sinric_ok = False
+        log("SINRIC: desconectado")
 
     async def enviar_presenca(self, ativo: bool) -> bool:
-        if not self.conectado or not self.ws:
+        if not self.sensor:
             return False
         try:
-            await self.ws.send(self.montar_evento(ativo))
-            return True
+            return await self.sensor.send_motion_event(ativo)
         except Exception as erro:
-            self.conectado = False
-            estado.sinric_ok = False
             log(f"SINRIC: falha ao enviar ({erro})")
             return False
+
+    async def parar(self) -> None:
+        if self.sensor:
+            await SinricPro.get_instance().stop()
 
 sinric = Sinric()
 
@@ -518,10 +485,9 @@ async def subir_servidor() -> web.AppRunner:
     runner = web.AppRunner(app)
     await runner.setup()
 
-    porta = CFG.get("porta_web", 8081)
-    await web.TCPSite(runner, "0.0.0.0", porta).start()
-    log(f"WEB: http://0.0.0.0:{porta}/")
-    log(f"WEB: http://0.0.0.0:{porta}/logs")
+    await web.TCPSite(runner, "0.0.0.0", PORTA_WEB).start()
+    log(f"WEB: http://0.0.0.0:{PORTA_WEB}/")
+    log(f"WEB: http://0.0.0.0:{PORTA_WEB}/logs")
 
     return runner
 
@@ -531,9 +497,8 @@ async def subir_servidor() -> web.AppRunner:
 
 async def ciclo(leitor) -> None:
     """Le o sensor a cada 300ms. Presenca liga na hora; desliga só depois
-    de ficar continuamente ausente por 'atraso_ausencia_seg' (evita flicker
+    de ficar continuamente ausente por 'ATRASO_AUSENCIA_SEG' (evita flicker
     quando a pessoa fica parada e o mmWave perde o rastreio por instantes)."""
-    atraso = float(CFG.get("atraso_ausencia_seg", 3.0))
     ausente_desde: float | None = None
 
     while True:
@@ -554,17 +519,17 @@ async def ciclo(leitor) -> None:
                 log("PRESENCA: detectada")
                 enviado = await sinric.enviar_presenca(True)
                 if not enviado:
-                    log("SINRIC: evento não enviado (desconectado)")
+                    log("SINRIC: evento não enviado (desconectado ou rate limit)")
         else:
             if estado.presenca:
                 if ausente_desde is None:
                     ausente_desde = agora
-                elif agora - ausente_desde >= atraso:
+                elif agora - ausente_desde >= ATRASO_AUSENCIA_SEG:
                     estado.presenca = False
-                    log(f"PRESENCA: ausente (sem detecção por {atraso:.0f}s)")
+                    log(f"PRESENCA: ausente (sem detecção por {ATRASO_AUSENCIA_SEG:.0f}s)")
                     enviado = await sinric.enviar_presenca(False)
                     if not enviado:
-                        log("SINRIC: evento não enviado (desconectado)")
+                        log("SINRIC: evento não enviado (desconectado ou rate limit)")
 
 async def principal(simular: bool) -> None:
     leitor = montar_leitor(simular)
@@ -576,14 +541,16 @@ async def principal(simular: bool) -> None:
     except Exception:
         pass
 
-    asyncio.create_task(sinric.tarefa())
+    await sinric.iniciar()
     runner = await subir_servidor()
 
     try:
         await ciclo(leitor)
     except KeyboardInterrupt:
         log("Encerrando...")
+    finally:
         await runner.cleanup()
+        await sinric.parar()
 
 # =========================================================================
 

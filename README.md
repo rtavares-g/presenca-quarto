@@ -28,7 +28,7 @@ cima pra baixo): `VIN`, `GND`, `RX`, `TX`, `OUT`.
 | TX | GPIO 15 (RXD) | pino 10 | opcional, não usado pelo script (config. avançada via UART) |
 
 Se o painel mostrar presença invertida (SIM quando vazio, NÃO quando tem
-alguém), troque `"out_ativo_alto"` para `false` no `config.json`.
+alguém), troque `OUT_ATIVO_ALTO` para `0` no `.env`.
 
 ## Instalação automática
 
@@ -38,10 +38,10 @@ cd ~/presenca-quarto
 ./install.sh
 ```
 
-O `install.sh` instala as dependências do sistema, cria `config.json` a
+O `install.sh` instala as dependências do sistema, cria `.env` a
 partir do exemplo e pede no terminal o **Device ID**, **App Key** e **App
 Secret** do Sinric Pro (se deixar algum campo em branco, edite depois com
-`nano config.json`), monta o venv e instala o serviço.
+`nano .env`), monta o venv e instala o serviço.
 
 ## Instalação manual (passo a passo)
 
@@ -50,12 +50,12 @@ sudo apt update
 sudo apt install -y python3-venv python3-pip python3-lgpio
 
 mkdir -p ~/presenca-quarto && cd ~/presenca-quarto
-# copie presenca_quarto.py, config.json (baseado no config.example.json),
+# copie presenca_quarto.py, .env (baseado no .env.example),
 # requirements.txt e presenca-quarto.service para cá
 
-cp config.example.json config.json
-nano config.json             # preencha device_id / app_key / app_secret do Sinric Pro
-chmod 600 config.json        # o arquivo guarda as chaves do Sinric
+cp .env.example .env
+nano .env                    # preencha SINRIC_DEVICE_ID / SINRIC_APP_KEY / SINRIC_APP_SECRET
+chmod 600 .env                # o arquivo guarda as chaves do Sinric
 
 python3 -m venv --system-site-packages venv
 ./venv/bin/pip install -r requirements.txt
@@ -75,8 +75,9 @@ do sensor, `PRESENCA: detectada`.
 1. No [portal da Sinric Pro](https://portal.sinric.pro), crie um novo
    dispositivo do tipo **Motion Sensor**.
 2. Copie o **Device ID** gerado e, na aba de credenciais do app,
-   **App Key** e **App Secret**.
-3. Coloque os três valores em `config.json` (ou informe durante o
+   **App Key** e **App Secret** (a mesma da sua conta, compartilhada com
+   os outros dispositivos Sinric já configurados neste Raspberry Pi).
+3. Coloque os três valores em `.env` (ou informe durante o
    `install.sh`).
 
 ## Serviço automático
@@ -107,11 +108,14 @@ Alterna presença simulada a cada ~6s, sem precisar do sensor nem do GPIO.
 
 ## Ajustes finos
 
-- `out_ativo_alto`: inverta se a lógica do OUT estiver "ao contrário".
-- `atraso_ausencia_seg`: quanto tempo sem detecção até marcar "ausente".
+Todas as opções ficam em `.env` (veja `.env.example`):
+
+- `OUT_ATIVO_ALTO`: inverta (`0`) se a lógica do OUT estiver "ao contrário".
+- `ATRASO_AUSENCIA_SEG`: quanto tempo sem detecção até marcar "ausente".
   A detecção de presença é imediata; só a ausência tem esse atraso, para
   não ficar piscando quando a pessoa fica parada e o mmWave perde o
   rastreio por um instante. Aumente se a Sinric estiver alternando
   demais; diminua se a resposta parecer lenta.
-- `porta_web`: porta do painel HTTP (padrão 8081 — o `sensor-pi` já usa a
+- `PORTA_WEB`: porta do painel HTTP (padrão 8081 — o `sensor-pi` já usa a
   8080 neste mesmo Raspberry Pi).
+- `SINRIC_DEBUG`: ponha `1` para logs detalhados do SDK da Sinric Pro.
