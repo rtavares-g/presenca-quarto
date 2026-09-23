@@ -283,10 +283,18 @@ class Sinric:
         # sozinho no próximo giro (evita disputar o rate limit de eventos
         # com uma detecção real que aconteça no mesmo instante)
         estado.sinric_confirmado = None
+        self._notificar_painel()
 
     def _ao_desconectar(self) -> None:
         estado.sinric_ok = False
         log("SINRIC: desconectado")
+        self._notificar_painel()
+
+    def _notificar_painel(self) -> None:
+        try:
+            asyncio.get_running_loop().create_task(broadcast_presenca())
+        except RuntimeError:
+            pass  # fora do event loop (ex: chamado antes do loop iniciar)
 
     async def enviar_presenca(self, ativo: bool) -> bool:
         if not self.sensor:
@@ -302,6 +310,32 @@ class Sinric:
             await SinricPro.get_instance().stop()
 
 sinric = Sinric()
+
+# =========================================================================
+# PRESENCA - estado em JSON e broadcast em tempo real (WebSocket)
+# =========================================================================
+
+presenca_clientes: set[web.WebSocketResponse] = set()
+
+def estado_presenca_json() -> dict:
+    duracao_seg = None
+    if estado.presenca and estado.presenca_desde is not None:
+        duracao_seg = round(time.monotonic() - estado.presenca_desde)
+    return {
+        "presence": estado.presenca,
+        "sinric": estado.sinric_ok,
+        "duracao_seg": duracao_seg,
+    }
+
+async def broadcast_presenca() -> None:
+    dados = estado_presenca_json()
+    mortos = set()
+    for ws in presenca_clientes:
+        try:
+            await ws.send_json(dados)
+        except Exception:
+            mortos.add(ws)
+    presenca_clientes.difference_update(mortos)
 
 # =========================================================================
 # HTTP ROUTES
@@ -375,16 +409,34 @@ function formatarDuracao(seg) {
     return `há ${s}s`;
 }
 
-async function atualizar() {
-    const r = await fetch('/presenca');
-    const d = await r.json();
+let ultimoEstado = null;
+let ultimoEstadoEm = 0;
+
+function renderizarPresenca() {
+    if (!ultimoEstado) return;
     const el = document.getElementById('presenca');
-    el.textContent = d.presence ? 'SIM' : 'NÃO';
-    el.className = 'stat-value ' + (d.presence ? 'on' : 'off');
-    document.getElementById('duracao').textContent = d.presence ? formatarDuracao(d.duracao_seg) : '';
+    el.textContent = ultimoEstado.presence ? 'SIM' : 'NÃO';
+    el.className = 'stat-value ' + (ultimoEstado.presence ? 'on' : 'off');
+    const dur = document.getElementById('duracao');
+    if (ultimoEstado.presence && ultimoEstado.duracao_seg != null) {
+        const decorrido = Math.floor((performance.now() - ultimoEstadoEm) / 1000);
+        dur.textContent = formatarDuracao(ultimoEstado.duracao_seg + decorrido);
+    } else {
+        dur.textContent = '';
+    }
 }
-atualizar();
-setInterval(atualizar, 10000);
+
+function conectarPresenca() {
+    const ws = new WebSocket((location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host + '/presenca-ws');
+    ws.onmessage = e => {
+        ultimoEstado = JSON.parse(e.data);
+        ultimoEstadoEm = performance.now();
+        renderizarPresenca();
+    };
+    ws.onclose = () => setTimeout(conectarPresenca, 3000);
+}
+conectarPresenca();
+setInterval(renderizarPresenca, 1000);
 
 let wsSensor;
 function conectarSensor() {
@@ -427,14 +479,21 @@ document.getElementById('btnSalvarSensor').onclick = () => {
     return web.Response(text=html, content_type="text/html")
 
 async def rota_presenca(_: web.Request) -> web.Response:
-    duracao_seg = None
-    if estado.presenca and estado.presenca_desde is not None:
-        duracao_seg = round(time.monotonic() - estado.presenca_desde)
-    return web.json_response({
-        "presence": estado.presenca,
-        "sinric": estado.sinric_ok,
-        "duracao_seg": duracao_seg,
-    })
+    return web.json_response(estado_presenca_json())
+
+async def rota_presenca_ws(request: web.Request) -> web.WebSocketResponse:
+    ws = web.WebSocketResponse(heartbeat=30)
+    await ws.prepare(request)
+    presenca_clientes.add(ws)
+
+    try:
+        await ws.send_json(estado_presenca_json())
+        async for msg in ws:
+            pass
+    finally:
+        presenca_clientes.discard(ws)
+
+    return ws
 
 async def rota_logs(request: web.Request) -> web.StreamResponse:
     if request.headers.get("Upgrade", "").lower() != "websocket":
@@ -664,6 +723,7 @@ async def subir_servidor() -> web.AppRunner:
     app.add_routes([
         web.get("/", rota_painel),
         web.get("/presenca", rota_presenca),
+        web.get("/presenca-ws", rota_presenca_ws),
         web.get("/logs", rota_logs),
         web.get("/sensor-ws", rota_sensor_ws),
     ])
@@ -709,6 +769,7 @@ async def ciclo(leitor) -> None:
                 estado.presenca = True
                 estado.presenca_desde = agora
                 log("PRESENCA: detectada")
+                await broadcast_presenca()
         else:
             if estado.presenca:
                 if ausente_desde is None:
@@ -717,6 +778,7 @@ async def ciclo(leitor) -> None:
                     estado.presenca = False
                     estado.presenca_desde = None
                     log(f"PRESENCA: ausente (sem detecção por {ATRASO_AUSENCIA_SEG:.0f}s)")
+                    await broadcast_presenca()
 
         if estado.sinric_confirmado != estado.presenca:
             if await sinric.enviar_presenca(estado.presenca):

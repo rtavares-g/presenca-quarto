@@ -143,6 +143,7 @@ journalctl -u presenca-quarto -f
 |---|---|
 | `/` | painel com o estado atual de presença e o ajuste de alcance/sensibilidade |
 | `/presenca` | JSON com `presence`, `sinric` e `duracao_seg` (tempo da presença atual) |
+| `/presenca-ws` | WebSocket que o painel usa para atualizar em tempo real (sem polling) |
 | `/logs` | console remoto ao vivo (WebSocket) |
 | `/sensor-ws` | WebSocket usado pelo painel para ler/salvar alcance e sensibilidade |
 
