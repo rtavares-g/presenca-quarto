@@ -450,7 +450,7 @@ function conectarSensor() {
             document.getElementById('minCm').value = d.min_cm;
             document.getElementById('maxCm').value = d.max_cm;
             document.getElementById('sensib').value = d.sensibilidade;
-            msg.textContent = 'Configuração salva no sensor.';
+            msg.textContent = d.aplicado ? 'Configuração salva no sensor.' : 'Configuração atual do sensor.';
             msg.className = 'msg-sensor ok';
         } else {
             msg.textContent = d.erro;
@@ -681,7 +681,7 @@ async def rota_sensor_ws(request: web.Request) -> web.WebSocketResponse:
     async with sensor_uart_lock:
         try:
             atual = await asyncio.to_thread(sensor_uart.ler)
-            await ws.send_json({"ok": True, **atual})
+            await ws.send_json({"ok": True, "aplicado": False, **atual})
         except Exception as e:
             await ws.send_json({"ok": False, "erro": str(e)})
 
@@ -710,7 +710,7 @@ async def rota_sensor_ws(request: web.Request) -> web.WebSocketResponse:
             f"SENSOR-UART: configuração salva (min={novo['min_cm']}cm "
             f"max={novo['max_cm']}cm sensibilidade={novo['sensibilidade']})"
         )
-        await ws.send_json({"ok": True, **novo})
+        await ws.send_json({"ok": True, "aplicado": True, **novo})
 
     return ws
 
