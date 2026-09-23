@@ -309,6 +309,20 @@ class Sinric:
         if self.sensor:
             await SinricPro.get_instance().stop()
 
+    async def vigiar_reconexao(self) -> None:
+        """Contorna um bug do SDK: se a 1ª tentativa de reconexão falhar,
+        ele desiste para sempre em vez de reagendar outra (_reconnect() só
+        tenta uma vez e só loga "Reconnection failed"). Aqui forçamos uma
+        nova tentativa periodicamente enquanto a conexão estiver caída."""
+        while True:
+            await asyncio.sleep(30)
+            if not self.configurado or estado.sinric_ok:
+                continue
+            sp = SinricPro.get_instance()
+            if sp.websocket and not sp.websocket.is_connected():
+                log("SINRIC: sem conexão há um tempo, forçando nova tentativa")
+                sp.websocket.schedule_reconnect()
+
 sinric = Sinric()
 
 # =========================================================================
@@ -841,12 +855,14 @@ async def principal(simular: bool) -> None:
 
     await sinric.iniciar()
     runner = await subir_servidor()
+    vigia = asyncio.create_task(sinric.vigiar_reconexao())
 
     try:
         await ciclo(leitor)
     except KeyboardInterrupt:
         log("Encerrando...")
     finally:
+        vigia.cancel()
         await runner.cleanup()
         await sinric.parar()
 
