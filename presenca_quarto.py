@@ -92,6 +92,7 @@ class Estado:
         self.presenca = False
         self.sinric_ok = False
         self.sinric_confirmado: bool | None = None  # último valor confirmado (enviado com sucesso)
+        self.presenca_desde: float | None = None  # time.monotonic() de quando a presença atual começou
 
 estado = Estado()
 
@@ -340,6 +341,7 @@ a:hover { text-decoration: underline; }
 <div class='stat'>
 <div class='stat-value' id='presenca'>--</div>
 <div class='stat-label'>Presença detectada</div>
+<div class='stat-label' id='duracao'></div>
 </div>
 <div class='stat card-sensor'>
 <h2>⚙️ Alcance e sensibilidade do sensor</h2>
@@ -364,15 +366,25 @@ a:hover { text-decoration: underline; }
 </div>
 </div>
 <script>
+function formatarDuracao(seg) {
+    const h = Math.floor(seg / 3600);
+    const m = Math.floor((seg % 3600) / 60);
+    const s = seg % 60;
+    if (h > 0) return `há ${h}h ${m}min`;
+    if (m > 0) return `há ${m}min ${s}s`;
+    return `há ${s}s`;
+}
+
 async function atualizar() {
     const r = await fetch('/presenca');
     const d = await r.json();
     const el = document.getElementById('presenca');
     el.textContent = d.presence ? 'SIM' : 'NÃO';
     el.className = 'stat-value ' + (d.presence ? 'on' : 'off');
+    document.getElementById('duracao').textContent = d.presence ? formatarDuracao(d.duracao_seg) : '';
 }
 atualizar();
-setInterval(atualizar, 2000);
+setInterval(atualizar, 10000);
 
 let wsSensor;
 function conectarSensor() {
@@ -415,9 +427,13 @@ document.getElementById('btnSalvarSensor').onclick = () => {
     return web.Response(text=html, content_type="text/html")
 
 async def rota_presenca(_: web.Request) -> web.Response:
+    duracao_seg = None
+    if estado.presenca and estado.presenca_desde is not None:
+        duracao_seg = round(time.monotonic() - estado.presenca_desde)
     return web.json_response({
         "presence": estado.presenca,
         "sinric": estado.sinric_ok,
+        "duracao_seg": duracao_seg,
     })
 
 async def rota_logs(request: web.Request) -> web.StreamResponse:
@@ -691,6 +707,7 @@ async def ciclo(leitor) -> None:
             ausente_desde = None
             if not estado.presenca:
                 estado.presenca = True
+                estado.presenca_desde = agora
                 log("PRESENCA: detectada")
         else:
             if estado.presenca:
@@ -698,6 +715,7 @@ async def ciclo(leitor) -> None:
                     ausente_desde = agora
                 elif agora - ausente_desde >= ATRASO_AUSENCIA_SEG:
                     estado.presenca = False
+                    estado.presenca_desde = None
                     log(f"PRESENCA: ausente (sem detecção por {ATRASO_AUSENCIA_SEG:.0f}s)")
 
         if estado.sinric_confirmado != estado.presenca:
