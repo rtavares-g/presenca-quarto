@@ -391,8 +391,11 @@ a:hover { text-decoration: underline; }
   <label for='sensib'>Sensibilidade (0-9)</label>
   <input type='number' id='sensib' min='0' max='9' step='1'>
 </div>
+<div style='display:flex; gap:8px;'>
+<button class='btn-salvar' id='btnCarregarSensor' disabled style='background:#21262d;'>Carregar atual</button>
 <button class='btn-salvar' id='btnSalvarSensor' disabled>Salvar no sensor</button>
-<div class='msg-sensor' id='msgSensor'>Lendo configuração atual...</div>
+</div>
+<div class='msg-sensor' id='msgSensor'>Ler ou salvar interrompe a detecção do sensor por um instante.</div>
 </div>
 <div class='links'>
 <a href='/presenca'>📊 JSON</a>
@@ -442,10 +445,13 @@ let wsSensor;
 function conectarSensor() {
     wsSensor = new WebSocket((location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host + '/sensor-ws');
     const msg = document.getElementById('msgSensor');
-    const btn = document.getElementById('btnSalvarSensor');
+    const btnCarregar = document.getElementById('btnCarregarSensor');
+    const btnSalvar = document.getElementById('btnSalvarSensor');
+    wsSensor.onopen = () => { btnCarregar.disabled = false; btnSalvar.disabled = false; };
     wsSensor.onmessage = e => {
         const d = JSON.parse(e.data);
-        btn.disabled = false;
+        btnCarregar.disabled = false;
+        btnSalvar.disabled = false;
         if (d.ok) {
             document.getElementById('minCm').value = d.min_cm;
             document.getElementById('maxCm').value = d.max_cm;
@@ -457,22 +463,40 @@ function conectarSensor() {
             msg.className = 'msg-sensor erro';
         }
     };
-    wsSensor.onclose = () => { btn.disabled = true; setTimeout(conectarSensor, 3000); };
+    wsSensor.onclose = () => {
+        btnCarregar.disabled = true;
+        btnSalvar.disabled = true;
+        setTimeout(conectarSensor, 3000);
+    };
 }
 conectarSensor();
 
+document.getElementById('btnCarregarSensor').onclick = () => {
+    if (!wsSensor || wsSensor.readyState !== WebSocket.OPEN) return;
+    document.getElementById('btnCarregarSensor').disabled = true;
+    document.getElementById('btnSalvarSensor').disabled = true;
+    const msg = document.getElementById('msgSensor');
+    msg.textContent = 'Lendo...';
+    msg.className = 'msg-sensor';
+    wsSensor.send(JSON.stringify({ acao: 'ler' }));
+};
+
 document.getElementById('btnSalvarSensor').onclick = () => {
     if (!wsSensor || wsSensor.readyState !== WebSocket.OPEN) return;
-    const btn = document.getElementById('btnSalvarSensor');
     const msg = document.getElementById('msgSensor');
-    btn.disabled = true;
+    const minCm = parseInt(document.getElementById('minCm').value, 10);
+    const maxCm = parseInt(document.getElementById('maxCm').value, 10);
+    const sensib = parseInt(document.getElementById('sensib').value, 10);
+    if (isNaN(minCm) || isNaN(maxCm) || isNaN(sensib)) {
+        msg.textContent = 'Preencha os três campos (ou clique em "Carregar atual" primeiro).';
+        msg.className = 'msg-sensor erro';
+        return;
+    }
+    document.getElementById('btnCarregarSensor').disabled = true;
+    document.getElementById('btnSalvarSensor').disabled = true;
     msg.textContent = 'Salvando...';
     msg.className = 'msg-sensor';
-    wsSensor.send(JSON.stringify({
-        min_cm: parseInt(document.getElementById('minCm').value, 10),
-        max_cm: parseInt(document.getElementById('maxCm').value, 10),
-        sensibilidade: parseInt(document.getElementById('sensib').value, 10),
-    }));
+    wsSensor.send(JSON.stringify({ acao: 'salvar', min_cm: minCm, max_cm: maxCm, sensibilidade: sensib }));
 };
 </script>
 </body></html>"""
@@ -675,25 +699,42 @@ conectar();
     return ws
 
 async def rota_sensor_ws(request: web.Request) -> web.WebSocketResponse:
+    """Só fala com o sensor (UART) quando o cliente pede - ler ou salvar
+    interrompem a detecção por um instante (o sensor para/reinicia a
+    cada comando), então nada acontece sozinho ao só abrir a conexão."""
     ws = web.WebSocketResponse(heartbeat=30)
     await ws.prepare(request)
-
-    async with sensor_uart_lock:
-        try:
-            atual = await asyncio.to_thread(sensor_uart.ler)
-            await ws.send_json({"ok": True, "aplicado": False, **atual})
-        except Exception as e:
-            await ws.send_json({"ok": False, "erro": str(e)})
 
     async for msg in ws:
         if msg.type != web.WSMsgType.TEXT:
             continue
         try:
             dados = json.loads(msg.data)
+            acao = dados["acao"]
+        except (json.JSONDecodeError, KeyError, TypeError):
+            await ws.send_json({"ok": False, "erro": "dados inválidos"})
+            continue
+
+        if acao == "ler":
+            log("SENSOR-UART: lendo configuração atual")
+            async with sensor_uart_lock:
+                try:
+                    atual = await asyncio.to_thread(sensor_uart.ler)
+                    await ws.send_json({"ok": True, "aplicado": False, **atual})
+                except Exception as e:
+                    log(f"SENSOR-UART: falha ao ler ({e})")
+                    await ws.send_json({"ok": False, "erro": str(e)})
+            continue
+
+        if acao != "salvar":
+            await ws.send_json({"ok": False, "erro": "ação inválida"})
+            continue
+
+        try:
             min_cm = int(dados["min_cm"])
             max_cm = int(dados["max_cm"])
             sensibilidade = int(dados["sensibilidade"])
-        except (json.JSONDecodeError, KeyError, TypeError, ValueError):
+        except (KeyError, TypeError, ValueError):
             await ws.send_json({"ok": False, "erro": "dados inválidos"})
             continue
 

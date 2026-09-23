@@ -38,8 +38,10 @@ na memória do próprio sensor - só precisa aplicar de novo se quiser mudar o
 ajuste, não a cada boot. Duas formas de fazer isso:
 
 - **Pelo painel web** (`http://<ip-do-pi>:8081/`): tem um card "Alcance e
-  sensibilidade do sensor" que lê os valores atuais e salva os novos via
-  WebSocket, sem precisar de SSH.
+  sensibilidade do sensor" com dois botões - "Carregar atual" (lê os valores
+  do sensor) e "Salvar no sensor" (aplica os campos). Nenhum dos dois roda
+  sozinho ao abrir a página - cada comando UART para e reinicia a detecção
+  do sensor por um instante, então só acontece quando você clica.
 - **Por linha de comando**, com o script `configurar_sensor.py` deste
   repositório (útil para automatizar ou rodar sem o serviço web no ar).
 
