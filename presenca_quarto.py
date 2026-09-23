@@ -75,6 +75,15 @@ OUT_ATIVO_ALTO = env_bool("OUT_ATIVO_ALTO", True)
 ATRASO_AUSENCIA_SEG = env_float("ATRASO_AUSENCIA_SEG", 3.0)
 PORTA_WEB = env_int("PORTA_WEB", 8081)
 
+# Se o serviço/Pi reiniciar ou a Sinric cair e voltar dentro desse tempo, o
+# estado anterior (presença, contagem e o que a Sinric já sabe) é mantido e
+# nada é reenviado se não tiver mudado. Passou disso, reenvia do zero.
+TOLERANCIA_OFFLINE_SEG = env_float("TOLERANCIA_OFFLINE_SEG", 300.0)
+ARQUIVO_ESTADO = Path(os.environ.get("ARQUIVO_ESTADO", RAIZ / "estado.json"))
+# Tempo que o sensor leva para voltar a detectar depois de reiniciar
+# (boot do serviço ou comando UART): ausência nesse intervalo é ignorada.
+SENSOR_AQUECIMENTO_SEG = 10.0
+
 SINRIC_DEVICE_ID = os.environ.get("SINRIC_DEVICE_ID", "")
 SINRIC_APP_KEY = os.environ.get("SINRIC_APP_KEY", "")
 SINRIC_APP_SECRET = os.environ.get("SINRIC_APP_SECRET", "")
@@ -93,8 +102,67 @@ class Estado:
         self.sinric_ok = False
         self.sinric_confirmado: bool | None = None  # último valor confirmado (enviado com sucesso)
         self.presenca_desde: float | None = None  # time.monotonic() de quando a presença atual começou
+        self.sinric_caiu_em: float | None = None  # time.monotonic() de quando a Sinric ficou offline
+        self.segurar_ausencia_ate = 0.0  # time.monotonic() até quando ignorar ausência (sensor reiniciando)
 
 estado = Estado()
+
+def salvar_estado() -> None:
+    """Grava o estado em disco para sobreviver a um reinício do serviço.
+    Usa relógio de parede (time.time) porque o monotonic zera no boot."""
+    agora_mono = time.monotonic()
+    agora = time.time()
+    desde = None
+    if estado.presenca_desde is not None:
+        desde = agora - (agora_mono - estado.presenca_desde)
+    dados = {
+        "presenca": estado.presenca,
+        "presenca_desde": desde,
+        "sinric_confirmado": estado.sinric_confirmado,
+        "salvo_em": agora,
+    }
+    try:
+        tmp = ARQUIVO_ESTADO.with_suffix(".tmp")
+        tmp.write_text(json.dumps(dados), encoding="utf-8")
+        os.replace(tmp, ARQUIVO_ESTADO)
+    except OSError as e:
+        log(f"ESTADO: falha ao salvar ({e})")
+
+def restaurar_estado() -> None:
+    """Se o último estado salvo tiver menos de TOLERANCIA_OFFLINE_SEG,
+    retoma presença, contagem e confirmação da Sinric de onde parou."""
+    try:
+        dados = json.loads(ARQUIVO_ESTADO.read_text(encoding="utf-8"))
+        salvo_em = float(dados["salvo_em"])
+    except FileNotFoundError:
+        return
+    except (OSError, ValueError, KeyError, TypeError) as e:
+        log(f"ESTADO: arquivo inválido, ignorando ({e})")
+        return
+
+    offline = time.time() - salvo_em
+    # offline negativo = relógio voltou (Pi sem RTC antes do NTP): não dá
+    # para saber quanto tempo passou, então trata como expirado
+    if not (0 <= offline <= TOLERANCIA_OFFLINE_SEG):
+        log(f"ESTADO: último estado salvo expirado ({offline:.0f}s), começando do zero")
+        return
+
+    agora_mono = time.monotonic()
+    estado.presenca = bool(dados.get("presenca"))
+    desde = dados.get("presenca_desde")
+    if estado.presenca and desde is not None:
+        estado.presenca_desde = agora_mono - (time.time() - float(desde))
+    elif estado.presenca:
+        estado.presenca_desde = agora_mono
+    confirmado = dados.get("sinric_confirmado")
+    estado.sinric_confirmado = confirmado if isinstance(confirmado, bool) else None
+    # conta o tempo parado como tempo offline da Sinric (ver Sinric._ao_conectar)
+    estado.sinric_caiu_em = agora_mono - offline
+    estado.segurar_ausencia_ate = agora_mono + SENSOR_AQUECIMENTO_SEG
+    log(
+        f"ESTADO: retomado após {offline:.0f}s parado "
+        f"(presença {'SIM' if estado.presenca else 'NÃO'}, Sinric não será reenviada se nada mudar)"
+    )
 
 class Console:
     """Redireciona print() e erros (stdout/stderr) para log e WebSocket."""
@@ -278,14 +346,24 @@ class Sinric:
 
     def _ao_conectar(self) -> None:
         estado.sinric_ok = True
-        log("SINRIC: conectado")
-        # invalida a confirmação: o ciclo principal reenvia o estado atual
-        # sozinho no próximo giro (evita disputar o rate limit de eventos
-        # com uma detecção real que aconteça no mesmo instante)
-        estado.sinric_confirmado = None
+        caiu_em, estado.sinric_caiu_em = estado.sinric_caiu_em, None
+        offline = None if caiu_em is None else time.monotonic() - caiu_em
+        if offline is not None and offline <= TOLERANCIA_OFFLINE_SEG:
+            # voltou rápido: a Sinric ainda tem o último valor confirmado, o
+            # ciclo principal só reenvia se a presença mudou nesse meio tempo
+            log(f"SINRIC: conectado (offline por {offline:.0f}s, mantendo estado)")
+        else:
+            # primeira conexão ou offline demais: invalida a confirmação e o
+            # ciclo principal reenvia o estado atual sozinho no próximo giro
+            # (evita disputar o rate limit de eventos com uma detecção real
+            # que aconteça no mesmo instante)
+            log("SINRIC: conectado")
+            estado.sinric_confirmado = None
         self._notificar_painel()
 
     def _ao_desconectar(self) -> None:
+        if estado.sinric_ok:
+            estado.sinric_caiu_em = time.monotonic()
         estado.sinric_ok = False
         log("SINRIC: desconectado")
         self._notificar_painel()
@@ -712,6 +790,15 @@ conectar();
 
     return ws
 
+async def falar_com_sensor(funcao, *args) -> dict:
+    """Roda um comando UART segurando a ausência: o sensor para e reinicia
+    a detecção a cada comando, e o pino OUT cai enquanto isso."""
+    async with sensor_uart_lock:
+        try:
+            return await asyncio.to_thread(funcao, *args)
+        finally:
+            estado.segurar_ausencia_ate = time.monotonic() + SENSOR_AQUECIMENTO_SEG
+
 async def rota_sensor_ws(request: web.Request) -> web.WebSocketResponse:
     """Só fala com o sensor (UART) quando o cliente pede - ler ou salvar
     interrompem a detecção por um instante (o sensor para/reinicia a
@@ -731,13 +818,12 @@ async def rota_sensor_ws(request: web.Request) -> web.WebSocketResponse:
 
         if acao == "ler":
             log("SENSOR-UART: lendo configuração atual")
-            async with sensor_uart_lock:
-                try:
-                    atual = await asyncio.to_thread(sensor_uart.ler)
-                    await ws.send_json({"ok": True, "aplicado": False, **atual})
-                except Exception as e:
-                    log(f"SENSOR-UART: falha ao ler ({e})")
-                    await ws.send_json({"ok": False, "erro": str(e)})
+            try:
+                atual = await falar_com_sensor(sensor_uart.ler)
+                await ws.send_json({"ok": True, "aplicado": False, **atual})
+            except Exception as e:
+                log(f"SENSOR-UART: falha ao ler ({e})")
+                await ws.send_json({"ok": False, "erro": str(e)})
             continue
 
         if acao != "salvar":
@@ -753,13 +839,12 @@ async def rota_sensor_ws(request: web.Request) -> web.WebSocketResponse:
             continue
 
         log(f"SENSOR-UART: aplicando alcance {min_cm}-{max_cm}cm, sensibilidade {sensibilidade}")
-        async with sensor_uart_lock:
-            try:
-                novo = await asyncio.to_thread(sensor_uart.aplicar, min_cm, max_cm, sensibilidade)
-            except Exception as e:
-                log(f"SENSOR-UART: falha ao aplicar ({e})")
-                await ws.send_json({"ok": False, "erro": str(e)})
-                continue
+        try:
+            novo = await falar_com_sensor(sensor_uart.aplicar, min_cm, max_cm, sensibilidade)
+        except Exception as e:
+            log(f"SENSOR-UART: falha ao aplicar ({e})")
+            await ws.send_json({"ok": False, "erro": str(e)})
+            continue
 
         log(
             f"SENSOR-UART: configuração salva (min={novo['min_cm']}cm "
@@ -803,9 +888,13 @@ async def ciclo(leitor) -> None:
 
     O envio à Sinric é conferido a cada ciclo (não só na transição): se o
     último envio falhou (rate limit do SDK, reconexão etc.) ele é repetido
-    até ser confirmado, para nenhuma mudança de estado ficar perdida."""
+    até ser confirmado, para nenhuma mudança de estado ficar perdida.
+
+    O estado vai para disco a cada mudança e periodicamente, para um
+    reinício rápido retomar de onde parou (ver restaurar_estado)."""
     ausente_desde: float | None = None
     falha_avisada = False
+    salvo_em = 0.0
 
     while True:
         await asyncio.sleep(0.3)
@@ -824,28 +913,39 @@ async def ciclo(leitor) -> None:
                 estado.presenca = True
                 estado.presenca_desde = agora
                 log("PRESENCA: detectada")
+                salvar_estado()
                 await broadcast_presenca()
         else:
             if estado.presenca:
-                if ausente_desde is None:
+                if sensor_uart_lock.locked() or agora < estado.segurar_ausencia_ate:
+                    ausente_desde = None  # sensor reiniciando: OUT baixo não é ausência
+                elif ausente_desde is None:
                     ausente_desde = agora
                 elif agora - ausente_desde >= ATRASO_AUSENCIA_SEG:
                     estado.presenca = False
                     estado.presenca_desde = None
                     log(f"PRESENCA: ausente (sem detecção por {ATRASO_AUSENCIA_SEG:.0f}s)")
+                    salvar_estado()
                     await broadcast_presenca()
 
         if estado.sinric_confirmado != estado.presenca:
             if await sinric.enviar_presenca(estado.presenca):
                 estado.sinric_confirmado = estado.presenca
                 falha_avisada = False
+                salvar_estado()
             elif not falha_avisada:
                 log("SINRIC: evento não enviado (desconectado ou rate limit), tentando de novo...")
                 falha_avisada = True
 
+        # marca "ainda rodando" para o restaurar_estado medir o tempo parado
+        if agora - salvo_em >= 30:
+            salvar_estado()
+            salvo_em = agora
+
 async def principal(simular: bool) -> None:
     leitor = montar_leitor(simular)
     log(f"SENSOR: {'simulado' if simular else 'GPIO'}")
+    restaurar_estado()
 
     try:
         ip = socket.gethostbyname(socket.gethostname())
@@ -863,6 +963,7 @@ async def principal(simular: bool) -> None:
         log("Encerrando...")
     finally:
         vigia.cancel()
+        salvar_estado()
         await runner.cleanup()
         await sinric.parar()
 

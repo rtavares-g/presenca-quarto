@@ -174,6 +174,13 @@ Todas as opções ficam em `.env` (veja `.env.example`):
   não ficar piscando quando a pessoa fica parada e o mmWave perde o
   rastreio por um instante. Aumente se a Sinric estiver alternando
   demais; diminua se a resposta parecer lenta.
+- `TOLERANCIA_OFFLINE_SEG` (padrão 300 = 5 min): se o serviço/Pi reiniciar
+  ou a conexão com a Sinric cair e voltar dentro desse tempo, a presença e
+  a contagem continuam de onde pararam e nada é reenviado à Sinric se o
+  estado não mudou. Passou disso, começa do zero e reenvia. O estado fica
+  salvo em `estado.json`. Depois de um reinício (ou de ler/salvar a
+  configuração pela UART) a ausência é ignorada por 10s, enquanto o sensor
+  volta a detectar.
 - `PORTA_WEB`: porta do painel HTTP (padrão 8081 — o `sensor-pi` já usa a
   8080 neste mesmo Raspberry Pi).
 - `SINRIC_DEBUG`: ponha `1` para logs detalhados do SDK da Sinric Pro.
