@@ -49,3 +49,43 @@ sudo cp presenca-quarto.service /etc/systemd/system/
 sudo systemctl daemon-reload
 sudo systemctl enable --now presenca-quarto
 systemctl status presenca-quarto --no-pager
+
+echo
+read -rp "Configurar HTTPS com Nginx + Let's Encrypt agora? Requer dominio ja apontando pro IP publico e portas 80/443 liberadas no roteador [s/N]: " CONFIGURAR_HTTPS
+if [[ "$CONFIGURAR_HTTPS" =~ ^[sS] ]]; then
+    read -rp "Dominio (ex: presenca-quarto.seudominio.com): " DOMINIO
+    read -rp "E-mail para avisos do Let's Encrypt [gtavares.r@icloud.com]: " EMAIL_CERTBOT
+    EMAIL_CERTBOT="${EMAIL_CERTBOT:-gtavares.r@icloud.com}"
+
+    sudo apt install -y nginx certbot python3-certbot-nginx
+
+    NGINX_CONF="/etc/nginx/sites-available/$DOMINIO"
+    sudo tee "$NGINX_CONF" > /dev/null <<EOF
+server {
+    listen 80;
+    server_name $DOMINIO;
+
+    location / {
+        proxy_pass http://127.0.0.1:8081;
+        proxy_http_version 1.1;
+        proxy_set_header Host \$host;
+        proxy_set_header X-Real-IP \$remote_addr;
+        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto \$scheme;
+
+        # obrigatorio para os WebSockets (/logs, /presenca-ws, /sensor-ws)
+        proxy_set_header Upgrade \$http_upgrade;
+        proxy_set_header Connection "upgrade";
+        proxy_read_timeout 86400;
+    }
+}
+EOF
+
+    sudo ln -sf "$NGINX_CONF" "/etc/nginx/sites-enabled/$DOMINIO"
+    sudo nginx -t
+    sudo systemctl reload nginx
+
+    sudo certbot --nginx -d "$DOMINIO" --non-interactive --agree-tos -m "$EMAIL_CERTBOT" --redirect
+
+    echo "==> HTTPS configurado. Teste com: curl -I https://$DOMINIO/"
+fi

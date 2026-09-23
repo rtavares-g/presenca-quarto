@@ -92,6 +92,13 @@ partir do exemplo e pede no terminal o **Device ID**, **App Key** e **App
 Secret** do Sinric Pro (se deixar algum campo em branco, edite depois com
 `nano .env`), monta o venv e instala o serviço.
 
+No final, ele pergunta se você quer configurar HTTPS com Nginx + Let's
+Encrypt agora (opcional). Se responder que sim, pede o domínio (precisa já
+apontar pro IP público, registro DNS tipo `A`) e o e-mail para o Certbot, e
+configura o proxy reverso e o certificado sozinho - teste depois com
+`curl -I https://seu-dominio/`. Requer as portas 80 e 443 liberadas no
+roteador (port forwarding) para o IP local do Raspberry Pi.
+
 ## Instalação manual (passo a passo)
 
 ```bash
