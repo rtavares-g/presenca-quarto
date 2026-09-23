@@ -18,7 +18,7 @@ else
 fi
 
 sudo apt update
-sudo apt install -y python3-venv python3-pip python3-lgpio
+sudo apt install -y python3-venv python3-pip python3-lgpio python3-serial python3-smbus
 
 if [ ! -f .env ]; then
     cp .env.example .env

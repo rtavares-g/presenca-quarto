@@ -13,9 +13,9 @@ cima pra baixo): `VIN`, `GND`, `RX`, `TX`, `OUT`.
 - **OUT** é a saída digital pronta de presença: nível alto quando detecta
   alguém, baixo quando não detecta (o script usa só esse pino).
 - **RX/TX** são a UART do módulo, usada apenas para configuração avançada
-  (sensibilidade, alcance, modo) com a ferramenta/app da DFRobot — **não
-  são usados** pelo script atual, mas deixe os pinos acessíveis caso
-  queira ajustar esses parâmetros depois.
+  (sensibilidade, alcance, modo). O `presenca_quarto.py` (loop principal)
+  não usa esses pinos; quem fala com eles é o `configurar_sensor.py` — veja
+  [Ajustando alcance e sensibilidade](#ajustando-alcance-e-sensibilidade-uart).
 
 ## Ligações
 
@@ -29,6 +29,44 @@ cima pra baixo): `VIN`, `GND`, `RX`, `TX`, `OUT`.
 
 Se o painel mostrar presença invertida (SIM quando vazio, NÃO quando tem
 alguém), troque `OUT_ATIVO_ALTO` para `0` no `.env`.
+
+## Ajustando alcance e sensibilidade (UART)
+
+O pino OUT só dá um sim/não de presença; alcance e sensibilidade são
+configurados à parte, pela UART (RX/TX), com o script `configurar_sensor.py`
+deste repositório. É uma configuração que fica salva na memória do próprio
+sensor - só precisa rodar de novo se quiser mudar o ajuste, não a cada boot.
+
+**Habilitar a UART no Raspberry Pi** (uma vez só):
+
+```bash
+sudo raspi-config nonint do_serial_hw 0   # habilita a UART
+sudo raspi-config nonint do_serial_cons 1 # desliga o console serial
+```
+
+No Pi 3B/3B+/Zero W/4 a UART completa (PL011, usada pelo GPIO14/15) é
+compartilhada com o Bluetooth por padrão; se depois de reiniciar o script
+não conseguir falar com o sensor, desligue o Bluetooth em
+`/boot/firmware/config.txt`:
+
+```
+dtoverlay=disable-bt
+```
+
+e reinicie (`sudo reboot`).
+
+**Rodar o ajuste:**
+
+```bash
+./venv/bin/python configurar_sensor.py --max-cm 300 --sensibilidade 2
+```
+
+- `--min-cm` / `--max-cm`: alcance de detecção, em cm (mínimo 30, máximo
+  2000 - o `--max-cm` também vira o alcance de disparo).
+- `--sensibilidade`: 0 a 9, quanto menor mais difícil disparar.
+- `--baud`: baud rate da UART (padrão 9600, o mesmo do sensor).
+
+O script imprime os valores confirmados pelo próprio sensor no final.
 
 ## Instalação automática
 
