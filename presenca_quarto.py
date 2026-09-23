@@ -87,6 +87,7 @@ class Estado:
     def __init__(self) -> None:
         self.presenca = False
         self.sinric_ok = False
+        self.sinric_confirmado: bool | None = None  # último valor confirmado (enviado com sucesso)
 
 estado = Estado()
 
@@ -216,8 +217,10 @@ class Sinric:
     def _ao_conectar(self) -> None:
         estado.sinric_ok = True
         log("SINRIC: conectado")
-        # sincroniza o estado atual assim que (re)conecta
-        asyncio.get_running_loop().create_task(self.enviar_presenca(estado.presenca))
+        # invalida a confirmação: o ciclo principal reenvia o estado atual
+        # sozinho no próximo giro (evita disputar o rate limit de eventos
+        # com uma detecção real que aconteça no mesmo instante)
+        estado.sinric_confirmado = None
 
     def _ao_desconectar(self) -> None:
         estado.sinric_ok = False
@@ -498,8 +501,13 @@ async def subir_servidor() -> web.AppRunner:
 async def ciclo(leitor) -> None:
     """Le o sensor a cada 300ms. Presenca liga na hora; desliga só depois
     de ficar continuamente ausente por 'ATRASO_AUSENCIA_SEG' (evita flicker
-    quando a pessoa fica parada e o mmWave perde o rastreio por instantes)."""
+    quando a pessoa fica parada e o mmWave perde o rastreio por instantes).
+
+    O envio à Sinric é conferido a cada ciclo (não só na transição): se o
+    último envio falhou (rate limit do SDK, reconexão etc.) ele é repetido
+    até ser confirmado, para nenhuma mudança de estado ficar perdida."""
     ausente_desde: float | None = None
+    falha_avisada = False
 
     while True:
         await asyncio.sleep(0.3)
@@ -517,9 +525,6 @@ async def ciclo(leitor) -> None:
             if not estado.presenca:
                 estado.presenca = True
                 log("PRESENCA: detectada")
-                enviado = await sinric.enviar_presenca(True)
-                if not enviado:
-                    log("SINRIC: evento não enviado (desconectado ou rate limit)")
         else:
             if estado.presenca:
                 if ausente_desde is None:
@@ -527,9 +532,14 @@ async def ciclo(leitor) -> None:
                 elif agora - ausente_desde >= ATRASO_AUSENCIA_SEG:
                     estado.presenca = False
                     log(f"PRESENCA: ausente (sem detecção por {ATRASO_AUSENCIA_SEG:.0f}s)")
-                    enviado = await sinric.enviar_presenca(False)
-                    if not enviado:
-                        log("SINRIC: evento não enviado (desconectado ou rate limit)")
+
+        if estado.sinric_confirmado != estado.presenca:
+            if await sinric.enviar_presenca(estado.presenca):
+                estado.sinric_confirmado = estado.presenca
+                falha_avisada = False
+            elif not falha_avisada:
+                log("SINRIC: evento não enviado (desconectado ou rate limit), tentando de novo...")
+                falha_avisada = True
 
 async def principal(simular: bool) -> None:
     leitor = montar_leitor(simular)
