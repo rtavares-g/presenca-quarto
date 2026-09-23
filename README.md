@@ -33,9 +33,18 @@ alguém), troque `OUT_ATIVO_ALTO` para `0` no `.env`.
 ## Ajustando alcance e sensibilidade (UART)
 
 O pino OUT só dá um sim/não de presença; alcance e sensibilidade são
-configurados à parte, pela UART (RX/TX), com o script `configurar_sensor.py`
-deste repositório. É uma configuração que fica salva na memória do próprio
-sensor - só precisa rodar de novo se quiser mudar o ajuste, não a cada boot.
+configurados à parte, pela UART (RX/TX). É uma configuração que fica salva
+na memória do próprio sensor - só precisa aplicar de novo se quiser mudar o
+ajuste, não a cada boot. Duas formas de fazer isso:
+
+- **Pelo painel web** (`http://<ip-do-pi>:8081/`): tem um card "Alcance e
+  sensibilidade do sensor" que lê os valores atuais e salva os novos via
+  WebSocket, sem precisar de SSH.
+- **Por linha de comando**, com o script `configurar_sensor.py` deste
+  repositório (útil para automatizar ou rodar sem o serviço web no ar).
+
+Os dois falam com o sensor pela mesma UART - evite rodar o script ao mesmo
+tempo que estiver mexendo no card do painel, para não disputar a porta.
 
 **Habilitar a UART no Raspberry Pi** (uma vez só):
 
@@ -55,7 +64,7 @@ dtoverlay=disable-bt
 
 e reinicie (`sudo reboot`).
 
-**Rodar o ajuste:**
+**Rodar o ajuste pela linha de comando:**
 
 ```bash
 ./venv/bin/python configurar_sensor.py --max-cm 300 --sensibilidade 2
@@ -132,9 +141,10 @@ journalctl -u presenca-quarto -f
 
 | Caminho | Conteúdo |
 |---|---|
-| `/` | painel com o estado atual de presença |
+| `/` | painel com o estado atual de presença e o ajuste de alcance/sensibilidade |
 | `/presenca` | JSON com `presence` e `sinric` |
 | `/logs` | console remoto ao vivo (WebSocket) |
+| `/sensor-ws` | WebSocket usado pelo painel para ler/salvar alcance e sensibilidade |
 
 ## Testar sem hardware
 

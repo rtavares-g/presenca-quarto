@@ -22,6 +22,8 @@ from aiohttp import web
 from gpiozero import DigitalInputDevice
 from sinricpro import SinricPro, SinricProConfig, SinricProMotionSensor
 
+from DFRobot_C4001 import DFRobot_C4001_UART, EXIST_MODE
+
 # =========================================================================
 # CONFIGURACAO
 # =========================================================================
@@ -77,6 +79,8 @@ SINRIC_DEVICE_ID = os.environ.get("SINRIC_DEVICE_ID", "")
 SINRIC_APP_KEY = os.environ.get("SINRIC_APP_KEY", "")
 SINRIC_APP_SECRET = os.environ.get("SINRIC_APP_SECRET", "")
 SINRIC_DEBUG = env_bool("SINRIC_DEBUG", False)
+
+SENSOR_UART_BAUD = env_int("SENSOR_UART_BAUD", 9600)
 
 # =========================================================================
 # LOGGING - Console remoto
@@ -183,6 +187,63 @@ def montar_leitor(simular: bool):
     return LeitorPresenca(OUT_GPIO, OUT_ATIVO_ALTO)
 
 # =========================================================================
+# CONFIGURACAO DO SENSOR (UART - alcance/sensibilidade, pinos RX/TX)
+# =========================================================================
+
+RANGE_MIN_CM = (30, 2000)
+RANGE_MAX_CM = (240, 2000)
+SENSIBILIDADE_LIMITE = (0, 9)
+
+class SensorUART:
+    """Lê/ajusta alcance e sensibilidade do C4001 pela UART (RX/TX) -
+    separado da detecção pelo pino OUT. Abre e fecha a porta a cada
+    operação: evita manter uma conexão ociosa e disputar com o
+    configurar_sensor.py (CLI) se alguém rodar os dois ao mesmo tempo."""
+
+    def ler(self) -> dict:
+        radar = DFRobot_C4001_UART(SENSOR_UART_BAUD)
+        try:
+            return {
+                "min_cm": int(radar.get_min_range()),
+                "max_cm": int(radar.get_max_range()),
+                "sensibilidade": int(radar.get_trig_sensitivity()),
+            }
+        except Exception as e:
+            raise RuntimeError("sensor não respondeu (confira a fiação RX/TX)") from e
+        finally:
+            radar.ser.close()
+
+    def aplicar(self, min_cm: int, max_cm: int, sensibilidade: int) -> dict:
+        if not (RANGE_MIN_CM[0] <= min_cm <= RANGE_MIN_CM[1]):
+            raise ValueError(f"alcance mínimo deve ser {RANGE_MIN_CM[0]}-{RANGE_MIN_CM[1]}cm")
+        if not (RANGE_MAX_CM[0] <= max_cm <= RANGE_MAX_CM[1]):
+            raise ValueError(f"alcance máximo deve ser {RANGE_MAX_CM[0]}-{RANGE_MAX_CM[1]}cm")
+        if min_cm > max_cm:
+            raise ValueError("alcance mínimo não pode ser maior que o máximo")
+        if not (SENSIBILIDADE_LIMITE[0] <= sensibilidade <= SENSIBILIDADE_LIMITE[1]):
+            raise ValueError(f"sensibilidade deve ser {SENSIBILIDADE_LIMITE[0]}-{SENSIBILIDADE_LIMITE[1]}")
+
+        radar = DFRobot_C4001_UART(SENSOR_UART_BAUD)
+        try:
+            radar.set_sensor_mode(EXIST_MODE)
+            radar.set_detection_range(min_cm, max_cm, max_cm)
+            radar.set_trig_sensitivity(sensibilidade)
+            radar.set_keep_sensitivity(sensibilidade)
+            time.sleep(0.3)
+            return {
+                "min_cm": int(radar.get_min_range()),
+                "max_cm": int(radar.get_max_range()),
+                "sensibilidade": int(radar.get_trig_sensitivity()),
+            }
+        except Exception as e:
+            raise RuntimeError("sensor não respondeu (confira a fiação RX/TX)") from e
+        finally:
+            radar.ser.close()
+
+sensor_uart = SensorUART()
+sensor_uart_lock = asyncio.Lock()  # evita duas abas mexendo na UART ao mesmo tempo
+
+# =========================================================================
 # SINRIC PRO (capacidade Motion Sensor)
 # =========================================================================
 
@@ -258,6 +319,17 @@ h1 { color: #64c8ff; }
 .stat-value.on { color: #3fb950; }
 .stat-value.off { color: #999; }
 .stat-label { font-size: 0.9em; color: #999; margin-top: 5px; }
+.card-sensor { text-align: left; }
+.card-sensor h2 { font-size: 1em; color: #64c8ff; margin: 0 0 12px; }
+.campo { display: flex; flex-direction: column; gap: 4px; margin-bottom: 10px; font-size: 0.85em; color: #ccc; }
+.campo input { background: #0a1e3c; color: #fff; border: 1px solid #2a4a6c; border-radius: 6px; padding: 6px 8px; font-size: 1em; }
+.btn-salvar { background: #1f6feb; color: #fff; border: none; border-radius: 6px; padding: 8px 16px;
+              font-size: 0.9em; cursor: pointer; width: 100%; }
+.btn-salvar:hover { background: #388bfd; }
+.btn-salvar:disabled { opacity: 0.6; cursor: default; }
+.msg-sensor { font-size: 0.8em; margin-top: 8px; min-height: 1.2em; }
+.msg-sensor.ok { color: #3fb950; }
+.msg-sensor.erro { color: #f85149; }
 .links { margin-top: 20px; }
 a { color: #64c8ff; text-decoration: none; margin-right: 20px; }
 a:hover { text-decoration: underline; }
@@ -268,6 +340,23 @@ a:hover { text-decoration: underline; }
 <div class='stat'>
 <div class='stat-value' id='presenca'>--</div>
 <div class='stat-label'>Presença detectada</div>
+</div>
+<div class='stat card-sensor'>
+<h2>⚙️ Alcance e sensibilidade do sensor</h2>
+<div class='campo'>
+  <label for='minCm'>Alcance mínimo (cm)</label>
+  <input type='number' id='minCm' min='30' max='2000' step='10'>
+</div>
+<div class='campo'>
+  <label for='maxCm'>Alcance máximo (cm)</label>
+  <input type='number' id='maxCm' min='240' max='2000' step='10'>
+</div>
+<div class='campo'>
+  <label for='sensib'>Sensibilidade (0-9)</label>
+  <input type='number' id='sensib' min='0' max='9' step='1'>
+</div>
+<button class='btn-salvar' id='btnSalvarSensor' disabled>Salvar no sensor</button>
+<div class='msg-sensor' id='msgSensor'>Lendo configuração atual...</div>
 </div>
 <div class='links'>
 <a href='/presenca'>📊 JSON</a>
@@ -284,6 +373,43 @@ async function atualizar() {
 }
 atualizar();
 setInterval(atualizar, 2000);
+
+let wsSensor;
+function conectarSensor() {
+    wsSensor = new WebSocket((location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host + '/sensor-ws');
+    const msg = document.getElementById('msgSensor');
+    const btn = document.getElementById('btnSalvarSensor');
+    wsSensor.onmessage = e => {
+        const d = JSON.parse(e.data);
+        btn.disabled = false;
+        if (d.ok) {
+            document.getElementById('minCm').value = d.min_cm;
+            document.getElementById('maxCm').value = d.max_cm;
+            document.getElementById('sensib').value = d.sensibilidade;
+            msg.textContent = 'Configuração salva no sensor.';
+            msg.className = 'msg-sensor ok';
+        } else {
+            msg.textContent = d.erro;
+            msg.className = 'msg-sensor erro';
+        }
+    };
+    wsSensor.onclose = () => { btn.disabled = true; setTimeout(conectarSensor, 3000); };
+}
+conectarSensor();
+
+document.getElementById('btnSalvarSensor').onclick = () => {
+    if (!wsSensor || wsSensor.readyState !== WebSocket.OPEN) return;
+    const btn = document.getElementById('btnSalvarSensor');
+    const msg = document.getElementById('msgSensor');
+    btn.disabled = true;
+    msg.textContent = 'Salvando...';
+    msg.className = 'msg-sensor';
+    wsSensor.send(JSON.stringify({
+        min_cm: parseInt(document.getElementById('minCm').value, 10),
+        max_cm: parseInt(document.getElementById('maxCm').value, 10),
+        sensibilidade: parseInt(document.getElementById('sensib').value, 10),
+    }));
+};
 </script>
 </body></html>"""
     return web.Response(text=html, content_type="text/html")
@@ -473,6 +599,46 @@ conectar();
 
     return ws
 
+async def rota_sensor_ws(request: web.Request) -> web.WebSocketResponse:
+    ws = web.WebSocketResponse(heartbeat=30)
+    await ws.prepare(request)
+
+    async with sensor_uart_lock:
+        try:
+            atual = await asyncio.to_thread(sensor_uart.ler)
+            await ws.send_json({"ok": True, **atual})
+        except Exception as e:
+            await ws.send_json({"ok": False, "erro": str(e)})
+
+    async for msg in ws:
+        if msg.type != web.WSMsgType.TEXT:
+            continue
+        try:
+            dados = json.loads(msg.data)
+            min_cm = int(dados["min_cm"])
+            max_cm = int(dados["max_cm"])
+            sensibilidade = int(dados["sensibilidade"])
+        except (json.JSONDecodeError, KeyError, TypeError, ValueError):
+            await ws.send_json({"ok": False, "erro": "dados inválidos"})
+            continue
+
+        log(f"SENSOR-UART: aplicando alcance {min_cm}-{max_cm}cm, sensibilidade {sensibilidade}")
+        async with sensor_uart_lock:
+            try:
+                novo = await asyncio.to_thread(sensor_uart.aplicar, min_cm, max_cm, sensibilidade)
+            except Exception as e:
+                log(f"SENSOR-UART: falha ao aplicar ({e})")
+                await ws.send_json({"ok": False, "erro": str(e)})
+                continue
+
+        log(
+            f"SENSOR-UART: configuração salva (min={novo['min_cm']}cm "
+            f"max={novo['max_cm']}cm sensibilidade={novo['sensibilidade']})"
+        )
+        await ws.send_json({"ok": True, **novo})
+
+    return ws
+
 # =========================================================================
 # SERVIDOR
 # =========================================================================
@@ -483,6 +649,7 @@ async def subir_servidor() -> web.AppRunner:
         web.get("/", rota_painel),
         web.get("/presenca", rota_presenca),
         web.get("/logs", rota_logs),
+        web.get("/sensor-ws", rota_sensor_ws),
     ])
 
     runner = web.AppRunner(app)
