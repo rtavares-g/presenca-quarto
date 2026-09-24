@@ -75,6 +75,7 @@ OUT_GPIO = env_int("OUT_GPIO", 27)
 OUT_ATIVO_ALTO = env_bool("OUT_ATIVO_ALTO", True)
 ATRASO_AUSENCIA_SEG = env_float("ATRASO_AUSENCIA_SEG", 3.0)
 PORTA_WEB = env_int("PORTA_WEB", 8081)
+HOST_WEB = os.environ.get("HOST_WEB", "127.0.0.1")
 
 # Se o serviço/Pi reiniciar ou a Sinric cair e voltar dentro desse tempo, o
 # estado anterior (presença, contagem e o que a Sinric já sabe) é mantido e
@@ -891,9 +892,9 @@ async def subir_servidor() -> web.AppRunner:
     runner = web.AppRunner(app)
     await runner.setup()
 
-    await web.TCPSite(runner, "0.0.0.0", PORTA_WEB).start()
-    log(f"WEB: http://0.0.0.0:{PORTA_WEB}/")
-    log(f"WEB: http://0.0.0.0:{PORTA_WEB}/logs")
+    await web.TCPSite(runner, HOST_WEB, PORTA_WEB).start()
+    log(f"WEB: http://{HOST_WEB}:{PORTA_WEB}/")
+    log(f"WEB: http://{HOST_WEB}:{PORTA_WEB}/logs")
 
     return runner
 
