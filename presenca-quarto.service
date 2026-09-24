@@ -16,6 +16,12 @@ ExecStart=/home/raspberry/presenca-quarto/venv/bin/python /home/raspberry/presen
 Restart=always
 RestartSec=5
 
+# O programa avisa o systemd a cada giro do ciclo principal; se ficar 60s
+# sem avisar (travou), o systemd mata com SIGABRT (pilhas vão para o
+# journal) e o Restart=always sobe de novo.
+WatchdogSec=60
+NotifyAccess=main
+
 StandardOutput=journal
 StandardError=journal
 

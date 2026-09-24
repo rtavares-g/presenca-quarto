@@ -9,6 +9,7 @@ remoto para depuração.
 from __future__ import annotations
 
 import asyncio
+import faulthandler
 import json
 import os
 import socket
@@ -19,7 +20,7 @@ from datetime import datetime
 from pathlib import Path
 
 from aiohttp import web
-from gpiozero import DigitalInputDevice
+from gpiozero import InputDevice
 from sinricpro import SinricPro, SinricProConfig, SinricProMotionSensor
 
 from DFRobot_C4001 import DFRobot_C4001_UART, EXIST_MODE
@@ -91,6 +92,10 @@ SINRIC_DEBUG = env_bool("SINRIC_DEBUG", False)
 
 SENSOR_UART_BAUD = env_int("SENSOR_UART_BAUD", 9600)
 
+# Se o ciclo principal ficar esse tempo sem girar, loga onde ele parou e
+# encerra o processo para o systemd reiniciar (o estado é retomado do disco).
+CICLO_TRAVADO_SEG = 20.0
+
 # =========================================================================
 # LOGGING - Console remoto
 # =========================================================================
@@ -104,6 +109,7 @@ class Estado:
         self.presenca_desde: float | None = None  # time.monotonic() de quando a presença atual começou
         self.sinric_caiu_em: float | None = None  # time.monotonic() de quando a Sinric ficou offline
         self.segurar_ausencia_ate = 0.0  # time.monotonic() até quando ignorar ausência (sensor reiniciando)
+        self.ciclo_em = time.monotonic()  # último giro do ciclo principal (ver vigiar_ciclo)
 
 estado = Estado()
 
@@ -189,7 +195,7 @@ class Console:
         mortos = set()
         for ws in self.clientes:
             try:
-                await ws.send_str(msg)
+                await asyncio.wait_for(ws.send_str(msg), ENVIO_WS_TIMEOUT_SEG)
             except Exception:
                 mortos.add(ws)
         self.clientes -= mortos
@@ -222,19 +228,31 @@ class _Fluxo:
 console = Console()
 sys.stdout = console.stream(sys.stdout)
 sys.stderr = console.stream(sys.stderr, "STDERR: ")
+# se o systemd matar o processo pelo watchdog (SIGABRT), despeja a pilha de
+# todas as threads no journal - o stderr "de verdade", não o redirecionado
+faulthandler.enable(file=sys.__stderr__)
 
 def log(msg: str) -> None:
     print(msg)
+
+# Envio a um navegador do painel/logs que demore mais que isso = cliente
+# morto (conexão meio aberta): é descartado (o heartbeat do aiohttp fecha).
+ENVIO_WS_TIMEOUT_SEG = 5.0
 
 # =========================================================================
 # SENSOR DE PRESENCA (pino OUT do C4001)
 # =========================================================================
 
 class LeitorPresenca:
-    """Lê o pino digital OUT do sensor mmWave C4001."""
+    """Lê o pino digital OUT do sensor mmWave C4001.
+
+    Leitura direta do nível do pino (InputDevice), sem detecção de borda nem
+    debounce do lgpio: o ciclo já consulta o pino a cada 300ms e filtra
+    oscilações com ATRASO_AUSENCIA_SEG, então as threads de alerta/callback
+    do lgpio só acrescentariam pontos onde a leitura pode empacar."""
     def __init__(self, gpio: int, ativo_alto: bool) -> None:
         self.ativo_alto = ativo_alto
-        self.pino = DigitalInputDevice(gpio, pull_up=False, bounce_time=0.05)
+        self.pino = InputDevice(gpio, pull_up=False)
         log(f"SENSOR: lendo OUT no GPIO {gpio} (ativo em {'alto' if ativo_alto else 'baixo'})")
 
     def detectado(self) -> bool:
@@ -359,20 +377,14 @@ class Sinric:
             # que aconteça no mesmo instante)
             log("SINRIC: conectado")
             estado.sinric_confirmado = None
-        self._notificar_painel()
+        notificar_painel()
 
     def _ao_desconectar(self) -> None:
         if estado.sinric_ok:
             estado.sinric_caiu_em = time.monotonic()
         estado.sinric_ok = False
         log("SINRIC: desconectado")
-        self._notificar_painel()
-
-    def _notificar_painel(self) -> None:
-        try:
-            asyncio.get_running_loop().create_task(broadcast_presenca())
-        except RuntimeError:
-            pass  # fora do event loop (ex: chamado antes do loop iniciar)
+        notificar_painel()
 
     async def enviar_presenca(self, ativo: bool) -> bool:
         if not self.sensor:
@@ -424,10 +436,18 @@ async def broadcast_presenca() -> None:
     mortos = set()
     for ws in presenca_clientes:
         try:
-            await ws.send_json(dados)
+            await asyncio.wait_for(ws.send_json(dados), ENVIO_WS_TIMEOUT_SEG)
         except Exception:
             mortos.add(ws)
     presenca_clientes.difference_update(mortos)
+
+def notificar_painel() -> None:
+    """Dispara o broadcast sem esperar: um navegador que sumiu da rede (ex:
+    celular com o painel aberto saindo do Wi-Fi) não pode segurar quem chama."""
+    try:
+        asyncio.get_running_loop().create_task(broadcast_presenca())
+    except RuntimeError:
+        pass  # fora do event loop (ex: chamado antes do loop iniciar)
 
 # =========================================================================
 # HTTP ROUTES
@@ -878,6 +898,44 @@ async def subir_servidor() -> web.AppRunner:
     return runner
 
 # =========================================================================
+# WATCHDOG (systemd WatchdogSec + vigia interno do ciclo)
+# =========================================================================
+
+def avisar_systemd(msg: str) -> None:
+    """sd_notify sem depender de biblioteca: manda um datagrama para o
+    socket do systemd. Fora do systemd (NOTIFY_SOCKET vazio) não faz nada."""
+    endereco = os.environ.get("NOTIFY_SOCKET")
+    if not endereco:
+        return
+    if endereco.startswith("@"):
+        endereco = "\0" + endereco[1:]  # socket abstrato
+    try:
+        with socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM) as s:
+            s.setblocking(False)
+            s.sendto(msg.encode(), endereco)
+    except OSError:
+        pass
+
+async def vigiar_ciclo(tarefa: asyncio.Task) -> None:
+    """Se o ciclo parar de girar, registra onde ele empacou e encerra o
+    processo para o systemd subir de novo (o estado é retomado do disco).
+
+    Cobre o ciclo preso num await; se o event loop inteiro travar (chamada
+    síncrona presa), este vigia também para e quem pega é o WatchdogSec do
+    systemd, que mata com SIGABRT e o faulthandler despeja as pilhas."""
+    while True:
+        await asyncio.sleep(5)
+        parado = time.monotonic() - estado.ciclo_em
+        if parado < CICLO_TRAVADO_SEG:
+            continue
+        log(f"TRAVADO: ciclo principal sem girar há {parado:.0f}s, reiniciando. Pilha:")
+        for quadro in tarefa.get_stack():
+            log(f"TRAVADO:   {quadro.f_code.co_filename}:{quadro.f_lineno} em {quadro.f_code.co_name}")
+        salvar_estado()
+        sys.stdout.flush()
+        os._exit(1)  # systemd (Restart=always) sobe de novo
+
+# =========================================================================
 # LOOP PRINCIPAL
 # =========================================================================
 
@@ -898,6 +956,8 @@ async def ciclo(leitor) -> None:
 
     while True:
         await asyncio.sleep(0.3)
+        estado.ciclo_em = time.monotonic()
+        avisar_systemd("WATCHDOG=1")
 
         try:
             detectado = leitor.detectado()
@@ -914,7 +974,7 @@ async def ciclo(leitor) -> None:
                 estado.presenca_desde = agora
                 log("PRESENCA: detectada")
                 salvar_estado()
-                await broadcast_presenca()
+                notificar_painel()
         else:
             if estado.presenca:
                 if sensor_uart_lock.locked() or agora < estado.segurar_ausencia_ate:
@@ -926,7 +986,7 @@ async def ciclo(leitor) -> None:
                     estado.presenca_desde = None
                     log(f"PRESENCA: ausente (sem detecção por {ATRASO_AUSENCIA_SEG:.0f}s)")
                     salvar_estado()
-                    await broadcast_presenca()
+                    notificar_painel()
 
         if estado.sinric_confirmado != estado.presenca:
             if await sinric.enviar_presenca(estado.presenca):
@@ -956,13 +1016,18 @@ async def principal(simular: bool) -> None:
     await sinric.iniciar()
     runner = await subir_servidor()
     vigia = asyncio.create_task(sinric.vigiar_reconexao())
+    estado.ciclo_em = time.monotonic()
+    tarefa_ciclo = asyncio.create_task(ciclo(leitor))
+    vigia_ciclo = asyncio.create_task(vigiar_ciclo(tarefa_ciclo))
+    avisar_systemd("READY=1")
 
     try:
-        await ciclo(leitor)
+        await tarefa_ciclo
     except KeyboardInterrupt:
         log("Encerrando...")
     finally:
         vigia.cancel()
+        vigia_ciclo.cancel()
         salvar_estado()
         await runner.cleanup()
         await sinric.parar()
