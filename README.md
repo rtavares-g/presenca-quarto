@@ -146,6 +146,33 @@ systemctl status presenca-quarto
 journalctl -u presenca-quarto -f
 ```
 
+Se já tinha o serviço instalado, copie o `.service` de novo e rode o
+`daemon-reload` sempre que ele mudar (o watchdog abaixo depende disso).
+
+### Watchdog (reinício automático se travar)
+
+O serviço se recupera sozinho se o loop de leitura do sensor parar de
+girar, sem precisar reiniciar à mão:
+
+- **Vigia interno:** se o ciclo principal ficar 20s sem girar, o script
+  registra no log `TRAVADO:` com a linha onde ele parou e encerra; o
+  systemd (`Restart=always`) sobe de novo em 5s.
+- **Watchdog do systemd** (`WatchdogSec=60` no `.service`): o script avisa
+  o systemd a cada giro do ciclo. Se o processo inteiro congelar e ficar
+  60s sem avisar, o systemd mata com `SIGABRT` (a pilha de todas as
+  threads vai para o journal) e reinicia.
+
+Esses reinícios **não reenviam nada à Sinric** se a presença não mudou: o
+estado é salvo em `estado.json` e retomado dentro do
+`TOLERANCIA_OFFLINE_SEG` (veja [Ajustes finos](#ajustes-finos)).
+
+Para ver se já aconteceu algum:
+
+```bash
+journalctl -u presenca-quarto | grep -E "TRAVADO|watchdog"
+systemctl show presenca-quarto -p NRestarts
+```
+
 ## Endereços
 
 | Caminho | Conteúdo |
