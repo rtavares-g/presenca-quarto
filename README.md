@@ -37,7 +37,7 @@ configurados à parte, pela UART (RX/TX). É uma configuração que fica salva
 na memória do próprio sensor - só precisa aplicar de novo se quiser mudar o
 ajuste, não a cada boot. Duas formas de fazer isso:
 
-- **Pelo painel web** (`http://<ip-do-pi>:8081/`): tem um card "Alcance e
+- **Pelo painel web** (`https://presenca.quarto.rtavares.net/`): tem um card "Alcance e
   sensibilidade do sensor" com dois botões - "Carregar atual" (lê os valores
   do sensor) e "Salvar no sensor" (aplica os campos). Nenhum dos dois roda
   sozinho ao abrir a página - cada comando UART para e reinicia a detecção
@@ -93,11 +93,9 @@ Secret** do Sinric Pro (se deixar algum campo em branco, edite depois com
 `nano .env`), monta o venv e instala o serviço.
 
 No final, ele pergunta se você quer configurar HTTPS com Nginx + Let's
-Encrypt agora (opcional). Se responder que sim, pede o domínio (precisa já
-apontar pro IP público, registro DNS tipo `A`) e o e-mail para o Certbot, e
-configura o proxy reverso e o certificado sozinho - teste depois com
-`curl -I https://seu-dominio/`. Requer as portas 80 e 443 liberadas no
-roteador (port forwarding) para o IP local do Raspberry Pi.
+Encrypt. Responda **não**: o acesso externo é feito pelo Cloudflare Tunnel
+(veja [Acesso remoto](#acesso-remoto-cloudflare-tunnel)), que não precisa
+de Nginx nem de portas abertas no roteador.
 
 ## Instalação manual (passo a passo)
 
@@ -173,7 +171,27 @@ journalctl -u presenca-quarto | grep -E "TRAVADO|watchdog"
 systemctl show presenca-quarto -p NRestarts
 ```
 
+## Acesso remoto (Cloudflare Tunnel)
+
+O painel escuta só em `127.0.0.1:8081` - não é acessível pela rede
+local nem pela internet diretamente. O acesso externo passa pelo
+Cloudflare Tunnel (`cloudflared`, rodando como serviço neste Raspberry Pi)
+e é protegido pelo Cloudflare Access (login antes de chegar ao painel):
+
+| | |
+|---|---|
+| Domínio | `https://presenca.quarto.rtavares.net/` |
+| Rota no túnel (Public Hostname) | `presenca.quarto.rtavares.net` → `HTTP` `localhost:8081` |
+| Autenticação | aplicação no Cloudflare Access (Zero Trust → Access → Applications) |
+| Certificado | Advanced Certificate Manager (subdomínio de dois níveis não é coberto pelo Universal SSL) |
+
+Nenhuma porta precisa ficar aberta no roteador. Para voltar a liberar o
+painel na rede local, troque `HOST_WEB` no `.env` para `0.0.0.0` e reinicie o serviço.
+
 ## Endereços
+
+No próprio Pi, em `http://127.0.0.1:8081`, ou de fora em
+`https://presenca.quarto.rtavares.net`:
 
 | Caminho | Conteúdo |
 |---|---|
@@ -210,4 +228,7 @@ Todas as opções ficam em `.env` (veja `.env.example`):
   volta a detectar.
 - `PORTA_WEB`: porta do painel HTTP (padrão 8081 — o `sensor-pi` já usa a
   8080 neste mesmo Raspberry Pi).
+- `HOST_WEB`: endereço em que o painel escuta (padrão `127.0.0.1`, só o
+  próprio Pi - o acesso externo vem pelo Cloudflare Tunnel). Use `0.0.0.0`
+  para liberar na rede local.
 - `SINRIC_DEBUG`: ponha `1` para logs detalhados do SDK da Sinric Pro.
