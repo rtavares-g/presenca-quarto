@@ -174,8 +174,8 @@ def restaurar_estado() -> None:
 class Console:
     """Redireciona print() e erros (stdout/stderr) para log e WebSocket."""
     def __init__(self) -> None:
-        self.linhas = deque(maxlen=1000)
-        self.clientes = set()
+        self.linhas: deque[str] = deque(maxlen=1000)
+        self.clientes: set[web.WebSocketResponse] = set()
         self.original_stdout = sys.stdout
 
     def stream(self, original, prefixo: str = "") -> "_Fluxo":
@@ -231,7 +231,8 @@ sys.stdout = console.stream(sys.stdout)
 sys.stderr = console.stream(sys.stderr, "STDERR: ")
 # se o systemd matar o processo pelo watchdog (SIGABRT), despeja a pilha de
 # todas as threads no journal - o stderr "de verdade", não o redirecionado
-faulthandler.enable(file=sys.__stderr__)
+if sys.__stderr__ is not None:
+    faulthandler.enable(file=sys.__stderr__)
 
 def log(msg: str) -> None:
     print(msg)
