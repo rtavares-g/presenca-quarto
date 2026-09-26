@@ -20,8 +20,8 @@ from datetime import datetime
 from pathlib import Path
 
 from aiohttp import web
-from gpiozero import InputDevice
-from sinricpro import SinricPro, SinricProConfig, SinricProMotionSensor
+from gpiozero import InputDevice  # type: ignore[import-untyped]
+from sinricpro import SinricPro, SinricProConfig, SinricProMotionSensor  # type: ignore[import-untyped]
 
 from DFRobot_C4001 import DFRobot_C4001_UART, EXIST_MODE
 
