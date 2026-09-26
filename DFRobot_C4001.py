@@ -48,9 +48,9 @@ class struct_response_data:
 
 class struct_pwm_data:
   def __init__(self):
-    self.pwm1 = 0
-    self.pwm2 = 0
-    self.timer = 0
+    self.pwm1 = 0.0
+    self.pwm2 = 0.0
+    self.timer = 0.0
 
 class struct_all_data:
   def __init__(self):
@@ -124,8 +124,14 @@ class DFRobot_C4001(object):
     else:
       self.ser = serial.Serial("/dev/ttyAMA0", baudrate=Baud,stopbits=1, timeout=0.5)
       self.__uart_i2c = UART_MODE
-      if self.ser.isOpen == False:
+      if not self.ser.is_open:
         self.ser.open()
+
+  def write_reg(self, reg, data):
+    raise NotImplementedError
+
+  def read_reg(self, reg, len):
+    raise NotImplementedError
 
   def begin(self):
     '''!
@@ -772,7 +778,7 @@ class DFRobot_C4001_UART(DFRobot_C4001):
 
   def write_reg(self, reg, data):
     test = bytes(data, encoding='ascii')
-    self.ser.flushInput()
+    self.ser.reset_input_buffer()
     try:
       self.ser.write(test)
       return
@@ -781,12 +787,12 @@ class DFRobot_C4001_UART(DFRobot_C4001):
     return
 
   def read_reg(self, reg, len):
-    recv = [0]*len
+    recv = bytes(len)
     timenow = time.time()    
     while(time.time() - timenow) <= 1:
-      count = self.ser.inWaiting()
+      count = self.ser.in_waiting
       if count != 0:
         recv = self.ser.read(len)
-        self.ser.flushInput()
+        self.ser.reset_input_buffer()
         return recv
     return recv
