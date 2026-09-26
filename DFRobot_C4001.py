@@ -253,7 +253,9 @@ class DFRobot_C4001(object):
     else:
       data = "getSensitivity"
       response = self.wr_cmd(data, 1)
-      return response.response1
+      # A resposta é "Response <hold> <trigger>": o disparo é o 2º valor
+      # (a biblioteca original lia o 1º, trocando disparo e manutenção).
+      return response.response2
 
   def set_keep_sensitivity(self, sensitivity):
     '''!
@@ -285,7 +287,8 @@ class DFRobot_C4001(object):
     else:
       data = "getSensitivity"
       response = self.wr_cmd(data, 1)
-      return response.response2
+      # A resposta é "Response <hold> <trigger>": a manutenção é o 1º valor.
+      return response.response1
 
 
   def set_delay(self, trig, keep):
