@@ -11,7 +11,7 @@
 '''
 import serial
 import time
-import smbus
+import smbus  # type: ignore[import-not-found]
 
 I2C_MODE  = 0x01
 UART_MODE = 0x02
