@@ -42,6 +42,11 @@ ajuste, não a cada boot. Duas formas de fazer isso:
   do sensor) e "Salvar no sensor" (aplica os campos). Nenhum dos dois roda
   sozinho ao abrir a página - cada comando UART para e reinicia a detecção
   do sensor por um instante, então só acontece quando você clica.
+  O botão "Restaurar padrão" grava de volta a configuração de referência
+  (alcance 30-300cm, sensibilidade de disparo 1 e de manutenção 4, atraso de
+  disparo 1500ms, retenção 30s), útil se algo foi mudado à mão e não
+  funcionou bem. Esses valores ficam em `CONFIG_PADRAO`, no
+  `presenca_quarto.py`, e são os mesmos padrões do `configurar_sensor.py`.
 - **Por linha de comando**, com o script `configurar_sensor.py` deste
   repositório (útil para automatizar ou rodar sem o serviço web no ar).
 
@@ -69,9 +74,8 @@ e reinicie (`sudo reboot`).
 **Rodar o ajuste pela linha de comando:**
 
 ```bash
-./venv/bin/python configurar_sensor.py --max-cm 300 \
-    --sensibilidade-disparo 1 --sensibilidade-manutencao 4 \
-    --atraso-disparo-ms 1000 --retencao-seg 30
+./venv/bin/python configurar_sensor.py                 # aplica os valores padrão
+./venv/bin/python configurar_sensor.py --retencao-seg 60 # muda só a retenção; o resto volta ao padrão
 ```
 
 - `--min-cm` / `--max-cm`: alcance de detecção, em cm (mínimo 30, máximo

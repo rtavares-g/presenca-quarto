@@ -282,6 +282,18 @@ RANGE_MIN_CM = (30, 2000)
 RANGE_MAX_CM = (240, 2000)
 SENSIBILIDADE_LIMITE = (0, 9)
 RETENCAO_LIMITE_SEG = (2, 1500)
+# Valores de referência restaurados pelo botão "Restaurar padrão" do painel
+# (os mesmos padrões do configurar_sensor.py). Meio-termo para um quarto com
+# gatos: disparo baixo e atraso filtram animais passando, e a manutenção
+# segura alguém parado detectado.
+CONFIG_PADRAO = {
+    "min_cm": 30,
+    "max_cm": 300,
+    "sens_disparo": 1,
+    "sens_manutencao": 4,
+    "atraso_disparo_ms": 1500,
+    "retencao_seg": 30,
+}
 ATRASO_DISPARO_LIMITE_MS = (0, 2000)
 
 def ler_config_sensor(radar) -> dict:
@@ -535,6 +547,7 @@ a:hover { text-decoration: underline; }
 <div style='display:flex; gap:8px;'>
 <button class='btn-salvar' id='btnCarregarSensor' disabled style='background:#21262d;'>Carregar atual</button>
 <button class='btn-salvar' id='btnSalvarSensor' disabled>Salvar no sensor</button>
+<button class='btn-salvar' id='btnPadraoSensor' disabled style='background:#21262d;'>Restaurar padrão</button>
 </div>
 <div class='msg-sensor' id='msgSensor'>Ler ou salvar interrompe a detecção do sensor por um instante.</div>
 </div>
@@ -583,16 +596,19 @@ conectarPresenca();
 setInterval(renderizarPresenca, 1000);
 
 let wsSensor;
+function habilitarBotoesSensor(habilitar) {
+    for (const id of ['btnCarregarSensor', 'btnSalvarSensor', 'btnPadraoSensor']) {
+        document.getElementById(id).disabled = !habilitar;
+    }
+}
+
 function conectarSensor() {
     wsSensor = new WebSocket((location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host + '/sensor-ws');
     const msg = document.getElementById('msgSensor');
-    const btnCarregar = document.getElementById('btnCarregarSensor');
-    const btnSalvar = document.getElementById('btnSalvarSensor');
-    wsSensor.onopen = () => { btnCarregar.disabled = false; btnSalvar.disabled = false; };
+    wsSensor.onopen = () => habilitarBotoesSensor(true);
     wsSensor.onmessage = e => {
         const d = JSON.parse(e.data);
-        btnCarregar.disabled = false;
-        btnSalvar.disabled = false;
+        habilitarBotoesSensor(true);
         if (d.ok) {
             document.getElementById('minCm').value = d.min_cm;
             document.getElementById('maxCm').value = d.max_cm;
@@ -600,7 +616,8 @@ function conectarSensor() {
             document.getElementById('sensManutencao').value = d.sens_manutencao;
             document.getElementById('atrasoDisparo').value = d.atraso_disparo_ms;
             document.getElementById('retencao').value = d.retencao_seg;
-            msg.textContent = d.aplicado ? 'Configuração salva no sensor.' : 'Configuração atual do sensor.';
+            msg.textContent = d.padrao ? 'Configuração padrão restaurada no sensor.'
+                : d.aplicado ? 'Configuração salva no sensor.' : 'Configuração atual do sensor.';
             msg.className = 'msg-sensor ok';
         } else {
             msg.textContent = d.erro;
@@ -608,8 +625,7 @@ function conectarSensor() {
         }
     };
     wsSensor.onclose = () => {
-        btnCarregar.disabled = true;
-        btnSalvar.disabled = true;
+        habilitarBotoesSensor(false);
         setTimeout(conectarSensor, 3000);
     };
 }
@@ -617,8 +633,7 @@ conectarSensor();
 
 document.getElementById('btnCarregarSensor').onclick = () => {
     if (!wsSensor || wsSensor.readyState !== WebSocket.OPEN) return;
-    document.getElementById('btnCarregarSensor').disabled = true;
-    document.getElementById('btnSalvarSensor').disabled = true;
+    habilitarBotoesSensor(false);
     const msg = document.getElementById('msgSensor');
     msg.textContent = 'Lendo...';
     msg.className = 'msg-sensor';
@@ -639,8 +654,7 @@ document.getElementById('btnSalvarSensor').onclick = () => {
         msg.className = 'msg-sensor erro';
         return;
     }
-    document.getElementById('btnCarregarSensor').disabled = true;
-    document.getElementById('btnSalvarSensor').disabled = true;
+    habilitarBotoesSensor(false);
     msg.textContent = 'Salvando...';
     msg.className = 'msg-sensor';
     wsSensor.send(JSON.stringify({
@@ -648,6 +662,16 @@ document.getElementById('btnSalvarSensor').onclick = () => {
         sens_disparo: sensDisparo, sens_manutencao: sensManutencao,
         atraso_disparo_ms: atrasoDisparo, retencao_seg: retencao,
     }));
+};
+
+document.getElementById('btnPadraoSensor').onclick = () => {
+    if (!wsSensor || wsSensor.readyState !== WebSocket.OPEN) return;
+    if (!confirm('Restaurar a configuração padrão no sensor? Os ajustes atuais serão substituídos.')) return;
+    habilitarBotoesSensor(false);
+    const msg = document.getElementById('msgSensor');
+    msg.textContent = 'Restaurando padrão...';
+    msg.className = 'msg-sensor';
+    wsSensor.send(JSON.stringify({ acao: 'padrao' }));
 };
 </script>
 </body></html>"""
@@ -885,7 +909,10 @@ async def rota_sensor_ws(request: web.Request) -> web.WebSocketResponse:
                 await ws.send_json({"ok": False, "erro": str(e)})
             continue
 
-        if acao != "salvar":
+        if acao == "padrao":
+            log("SENSOR-UART: restaurando configuração padrão")
+            dados = {**dados, **CONFIG_PADRAO}
+        elif acao != "salvar":
             await ws.send_json({"ok": False, "erro": "ação inválida"})
             continue
 
@@ -920,7 +947,7 @@ async def rota_sensor_ws(request: web.Request) -> web.WebSocketResponse:
             f"manutenção={novo['sens_manutencao']} atraso={novo['atraso_disparo_ms']}ms "
             f"retenção={novo['retencao_seg']}s)"
         )
-        await ws.send_json({"ok": True, "aplicado": True, **novo})
+        await ws.send_json({"ok": True, "aplicado": True, "padrao": acao == "padrao", **novo})
 
     return ws
 

@@ -35,16 +35,16 @@ def analisar_argumentos() -> argparse.Namespace:
     parser.add_argument("--baud", type=int, default=9600, help="Baud rate da UART (padrão 9600)")
     parser.add_argument("--min-cm", type=int, default=30, help="Distância mínima de detecção, em cm (padrão 30)")
     parser.add_argument("--max-cm", type=int, default=300, help="Distância máxima de detecção, em cm (padrão 300 = 3m)")
-    parser.add_argument("--sensibilidade-disparo", type=int, default=2,
-                        help="Sensibilidade 0-9 para começar a detectar: quanto menor, mais movimento é preciso (padrão 2)")
-    parser.add_argument("--sensibilidade-manutencao", type=int, default=2,
-                        help="Sensibilidade 0-9 para continuar detectando alguém parado (padrão 2)")
+    parser.add_argument("--sensibilidade-disparo", type=int, default=1,
+                        help="Sensibilidade 0-9 para começar a detectar: quanto menor, mais movimento é preciso (padrão 1)")
+    parser.add_argument("--sensibilidade-manutencao", type=int, default=4,
+                        help="Sensibilidade 0-9 para continuar detectando alguém parado (padrão 4)")
     parser.add_argument("--sensibilidade", type=int,
                         help="Atalho: usa o mesmo valor para disparo e manutenção")
-    parser.add_argument("--atraso-disparo-ms", type=int, default=0,
-                        help="Tempo que a detecção precisa durar para o OUT subir, 0-2000ms (padrão 0)")
-    parser.add_argument("--retencao-seg", type=int, default=15,
-                        help="Tempo que o OUT segue alto após a última detecção, 2-1500s (padrão 15)")
+    parser.add_argument("--atraso-disparo-ms", type=int, default=1500,
+                        help="Tempo que a detecção precisa durar para o OUT subir, 0-2000ms (padrão 1500)")
+    parser.add_argument("--retencao-seg", type=int, default=30,
+                        help="Tempo que o OUT segue alto após a última detecção, 2-1500s (padrão 30)")
     args = parser.parse_args()
     if args.sensibilidade is not None:
         args.sensibilidade_disparo = args.sensibilidade_manutencao = args.sensibilidade
