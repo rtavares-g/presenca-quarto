@@ -69,12 +69,23 @@ e reinicie (`sudo reboot`).
 **Rodar o ajuste pela linha de comando:**
 
 ```bash
-./venv/bin/python configurar_sensor.py --max-cm 300 --sensibilidade 2
+./venv/bin/python configurar_sensor.py --max-cm 300 \
+    --sensibilidade-disparo 1 --sensibilidade-manutencao 4 \
+    --atraso-disparo-ms 1000 --retencao-seg 30
 ```
 
 - `--min-cm` / `--max-cm`: alcance de detecção, em cm (mínimo 30, máximo
   2000 - o `--max-cm` também vira o alcance de disparo).
-- `--sensibilidade`: 0 a 9, quanto menor mais difícil disparar.
+- `--sensibilidade-disparo`: 0 a 9, o quanto de movimento é preciso para
+  *começar* a detectar. Baixa evita disparos por animais e cortinas.
+- `--sensibilidade-manutencao`: 0 a 9, o quanto o sensor consegue *continuar*
+  detectando alguém parado (respiração, pequenos movimentos). Baixa demais
+  faz a presença cair enquanto a pessoa está quieta.
+- `--sensibilidade`: atalho que usa o mesmo valor nas duas.
+- `--atraso-disparo-ms`: 0 a 2000, quanto tempo a detecção precisa durar
+  para contar. Filtra movimentos rápidos, como um animal passando.
+- `--retencao-seg`: 2 a 1500, quanto tempo a presença segue marcada depois
+  da última detecção.
 - `--baud`: baud rate da UART (padrão 9600, o mesmo do sensor).
 
 O script imprime os valores confirmados pelo próprio sensor no final.
@@ -195,7 +206,7 @@ No próprio Pi, em `http://127.0.0.1:8081`, ou de fora em
 
 | Caminho | Conteúdo |
 |---|---|
-| `/` | painel com o estado atual de presença e o ajuste de alcance/sensibilidade |
+| `/` | painel com o estado atual de presença e os ajustes do sensor |
 | `/presenca` | JSON com `presence`, `sinric` e `duracao_seg` (tempo da presença atual) |
 | `/presenca-ws` | WebSocket que o painel usa para atualizar em tempo real (sem polling) |
 | `/logs` | console remoto ao vivo (WebSocket) |

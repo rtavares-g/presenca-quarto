@@ -281,9 +281,26 @@ def montar_leitor(simular: bool):
 RANGE_MIN_CM = (30, 2000)
 RANGE_MAX_CM = (240, 2000)
 SENSIBILIDADE_LIMITE = (0, 9)
+RETENCAO_LIMITE_SEG = (2, 1500)
+ATRASO_DISPARO_LIMITE_MS = (0, 2000)
+
+def ler_config_sensor(radar) -> dict:
+    """Configuração atual do C4001. O atraso de disparo é quanto tempo a
+    detecção precisa durar para o pino OUT subir (filtra movimentos rápidos,
+    como um gato passando); a retenção (keep timeout) é quanto tempo o OUT
+    segue alto depois da última detecção. A biblioteca devolve os dois em
+    unidades de 10ms e 0,5s."""
+    return {
+        "min_cm": int(radar.get_min_range()),
+        "max_cm": int(radar.get_max_range()),
+        "sens_disparo": int(radar.get_trig_sensitivity()),
+        "sens_manutencao": int(radar.get_keep_sensitivity()),
+        "atraso_disparo_ms": int(radar.get_trig_delay()) * 10,
+        "retencao_seg": int(radar.get_keep_timerout()) // 2,
+    }
 
 class SensorUART:
-    """Lê/ajusta alcance e sensibilidade do C4001 pela UART (RX/TX) -
+    """Lê/ajusta alcance, sensibilidade e retenção do C4001 pela UART (RX/TX) -
     separado da detecção pelo pino OUT. Abre e fecha a porta a cada
     operação: evita manter uma conexão ociosa e disputar com o
     configurar_sensor.py (CLI) se alguém rodar os dois ao mesmo tempo."""
@@ -291,38 +308,37 @@ class SensorUART:
     def ler(self) -> dict:
         radar = DFRobot_C4001_UART(SENSOR_UART_BAUD)
         try:
-            return {
-                "min_cm": int(radar.get_min_range()),
-                "max_cm": int(radar.get_max_range()),
-                "sensibilidade": int(radar.get_trig_sensitivity()),
-            }
+            return ler_config_sensor(radar)
         except Exception as e:
             raise RuntimeError("sensor não respondeu (confira a fiação RX/TX)") from e
         finally:
             radar.ser.close()
 
-    def aplicar(self, min_cm: int, max_cm: int, sensibilidade: int) -> dict:
+    def aplicar(self, min_cm: int, max_cm: int, sens_disparo: int,
+                sens_manutencao: int, atraso_disparo_ms: int, retencao_seg: int) -> dict:
         if not (RANGE_MIN_CM[0] <= min_cm <= RANGE_MIN_CM[1]):
             raise ValueError(f"alcance mínimo deve ser {RANGE_MIN_CM[0]}-{RANGE_MIN_CM[1]}cm")
         if not (RANGE_MAX_CM[0] <= max_cm <= RANGE_MAX_CM[1]):
             raise ValueError(f"alcance máximo deve ser {RANGE_MAX_CM[0]}-{RANGE_MAX_CM[1]}cm")
         if min_cm > max_cm:
             raise ValueError("alcance mínimo não pode ser maior que o máximo")
-        if not (SENSIBILIDADE_LIMITE[0] <= sensibilidade <= SENSIBILIDADE_LIMITE[1]):
-            raise ValueError(f"sensibilidade deve ser {SENSIBILIDADE_LIMITE[0]}-{SENSIBILIDADE_LIMITE[1]}")
+        for nome, valor in (("disparo", sens_disparo), ("manutenção", sens_manutencao)):
+            if not (SENSIBILIDADE_LIMITE[0] <= valor <= SENSIBILIDADE_LIMITE[1]):
+                raise ValueError(f"sensibilidade de {nome} deve ser {SENSIBILIDADE_LIMITE[0]}-{SENSIBILIDADE_LIMITE[1]}")
+        if not (ATRASO_DISPARO_LIMITE_MS[0] <= atraso_disparo_ms <= ATRASO_DISPARO_LIMITE_MS[1]):
+            raise ValueError(f"atraso de disparo deve ser {ATRASO_DISPARO_LIMITE_MS[0]}-{ATRASO_DISPARO_LIMITE_MS[1]}ms")
+        if not (RETENCAO_LIMITE_SEG[0] <= retencao_seg <= RETENCAO_LIMITE_SEG[1]):
+            raise ValueError(f"retenção deve ser {RETENCAO_LIMITE_SEG[0]}-{RETENCAO_LIMITE_SEG[1]}s")
 
         radar = DFRobot_C4001_UART(SENSOR_UART_BAUD)
         try:
             radar.set_sensor_mode(EXIST_MODE)
             radar.set_detection_range(min_cm, max_cm, max_cm)
-            radar.set_trig_sensitivity(sensibilidade)
-            radar.set_keep_sensitivity(sensibilidade)
+            radar.set_trig_sensitivity(sens_disparo)
+            radar.set_keep_sensitivity(sens_manutencao)
+            radar.set_delay(atraso_disparo_ms // 10, retencao_seg * 2)
             time.sleep(0.3)
-            return {
-                "min_cm": int(radar.get_min_range()),
-                "max_cm": int(radar.get_max_range()),
-                "sensibilidade": int(radar.get_trig_sensitivity()),
-            }
+            return ler_config_sensor(radar)
         except Exception as e:
             raise RuntimeError("sensor não respondeu (confira a fiação RX/TX)") from e
         finally:
@@ -491,7 +507,7 @@ a:hover { text-decoration: underline; }
 <div class='stat-label' id='duracao'></div>
 </div>
 <div class='stat card-sensor'>
-<h2>⚙️ Alcance e sensibilidade do sensor</h2>
+<h2>⚙️ Ajustes do sensor</h2>
 <div class='campo'>
   <label for='minCm'>Alcance mínimo (cm)</label>
   <input type='number' id='minCm' min='30' max='2000' step='10'>
@@ -501,8 +517,20 @@ a:hover { text-decoration: underline; }
   <input type='number' id='maxCm' min='240' max='2000' step='10'>
 </div>
 <div class='campo'>
-  <label for='sensib'>Sensibilidade (0-9)</label>
-  <input type='number' id='sensib' min='0' max='9' step='1'>
+  <label for='sensDisparo'>Sensibilidade de disparo (0-9)</label>
+  <input type='number' id='sensDisparo' min='0' max='9' step='1'>
+</div>
+<div class='campo'>
+  <label for='sensManutencao'>Sensibilidade de manutenção (0-9)</label>
+  <input type='number' id='sensManutencao' min='0' max='9' step='1'>
+</div>
+<div class='campo'>
+  <label for='atrasoDisparo'>Atraso de disparo (ms)</label>
+  <input type='number' id='atrasoDisparo' min='0' max='2000' step='10'>
+</div>
+<div class='campo'>
+  <label for='retencao'>Retenção após a última detecção (s)</label>
+  <input type='number' id='retencao' min='2' max='1500' step='1'>
 </div>
 <div style='display:flex; gap:8px;'>
 <button class='btn-salvar' id='btnCarregarSensor' disabled style='background:#21262d;'>Carregar atual</button>
@@ -568,7 +596,10 @@ function conectarSensor() {
         if (d.ok) {
             document.getElementById('minCm').value = d.min_cm;
             document.getElementById('maxCm').value = d.max_cm;
-            document.getElementById('sensib').value = d.sensibilidade;
+            document.getElementById('sensDisparo').value = d.sens_disparo;
+            document.getElementById('sensManutencao').value = d.sens_manutencao;
+            document.getElementById('atrasoDisparo').value = d.atraso_disparo_ms;
+            document.getElementById('retencao').value = d.retencao_seg;
             msg.textContent = d.aplicado ? 'Configuração salva no sensor.' : 'Configuração atual do sensor.';
             msg.className = 'msg-sensor ok';
         } else {
@@ -599,9 +630,12 @@ document.getElementById('btnSalvarSensor').onclick = () => {
     const msg = document.getElementById('msgSensor');
     const minCm = parseInt(document.getElementById('minCm').value, 10);
     const maxCm = parseInt(document.getElementById('maxCm').value, 10);
-    const sensib = parseInt(document.getElementById('sensib').value, 10);
-    if (isNaN(minCm) || isNaN(maxCm) || isNaN(sensib)) {
-        msg.textContent = 'Preencha os três campos (ou clique em "Carregar atual" primeiro).';
+    const sensDisparo = parseInt(document.getElementById('sensDisparo').value, 10);
+    const sensManutencao = parseInt(document.getElementById('sensManutencao').value, 10);
+    const atrasoDisparo = parseInt(document.getElementById('atrasoDisparo').value, 10);
+    const retencao = parseInt(document.getElementById('retencao').value, 10);
+    if ([minCm, maxCm, sensDisparo, sensManutencao, atrasoDisparo, retencao].some(isNaN)) {
+        msg.textContent = 'Preencha todos os campos (ou clique em "Carregar atual" primeiro).';
         msg.className = 'msg-sensor erro';
         return;
     }
@@ -609,7 +643,11 @@ document.getElementById('btnSalvarSensor').onclick = () => {
     document.getElementById('btnSalvarSensor').disabled = true;
     msg.textContent = 'Salvando...';
     msg.className = 'msg-sensor';
-    wsSensor.send(JSON.stringify({ acao: 'salvar', min_cm: minCm, max_cm: maxCm, sensibilidade: sensib }));
+    wsSensor.send(JSON.stringify({
+        acao: 'salvar', min_cm: minCm, max_cm: maxCm,
+        sens_disparo: sensDisparo, sens_manutencao: sensManutencao,
+        atraso_disparo_ms: atrasoDisparo, retencao_seg: retencao,
+    }));
 };
 </script>
 </body></html>"""
@@ -854,14 +892,23 @@ async def rota_sensor_ws(request: web.Request) -> web.WebSocketResponse:
         try:
             min_cm = int(dados["min_cm"])
             max_cm = int(dados["max_cm"])
-            sensibilidade = int(dados["sensibilidade"])
+            sens_disparo = int(dados["sens_disparo"])
+            sens_manutencao = int(dados["sens_manutencao"])
+            atraso_disparo_ms = int(dados["atraso_disparo_ms"])
+            retencao_seg = int(dados["retencao_seg"])
         except (KeyError, TypeError, ValueError):
             await ws.send_json({"ok": False, "erro": "dados inválidos"})
             continue
 
-        log(f"SENSOR-UART: aplicando alcance {min_cm}-{max_cm}cm, sensibilidade {sensibilidade}")
+        log(
+            f"SENSOR-UART: aplicando alcance {min_cm}-{max_cm}cm, sensibilidade "
+            f"disparo {sens_disparo} / manutenção {sens_manutencao}, "
+            f"atraso de disparo {atraso_disparo_ms}ms, retenção {retencao_seg}s"
+        )
         try:
-            novo = await falar_com_sensor(sensor_uart.aplicar, min_cm, max_cm, sensibilidade)
+            novo = await falar_com_sensor(
+                sensor_uart.aplicar, min_cm, max_cm, sens_disparo, sens_manutencao,
+                atraso_disparo_ms, retencao_seg)
         except Exception as e:
             log(f"SENSOR-UART: falha ao aplicar ({e})")
             await ws.send_json({"ok": False, "erro": str(e)})
@@ -869,7 +916,9 @@ async def rota_sensor_ws(request: web.Request) -> web.WebSocketResponse:
 
         log(
             f"SENSOR-UART: configuração salva (min={novo['min_cm']}cm "
-            f"max={novo['max_cm']}cm sensibilidade={novo['sensibilidade']})"
+            f"max={novo['max_cm']}cm disparo={novo['sens_disparo']} "
+            f"manutenção={novo['sens_manutencao']} atraso={novo['atraso_disparo_ms']}ms "
+            f"retenção={novo['retencao_seg']}s)"
         )
         await ws.send_json({"ok": True, "aplicado": True, **novo})
 
