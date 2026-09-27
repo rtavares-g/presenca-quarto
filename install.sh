@@ -45,7 +45,7 @@ if [ ! -d venv ]; then
 fi
 ./venv/bin/pip install -r requirements.txt
 
-sudo cp presenca-quarto.service /etc/systemd/system/
+sed -e "s|__USER__|$USER|g" -e "s|__HOME__|$HOME|g" presenca-quarto.service | sudo tee /etc/systemd/system/presenca-quarto.service > /dev/null
 sudo systemctl daemon-reload
 sudo systemctl enable --now presenca-quarto
 systemctl status presenca-quarto --no-pager
