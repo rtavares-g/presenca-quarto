@@ -5,13 +5,13 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-User=raspberry
-Group=raspberry
+User=__USER__
+Group=__USER__
 SupplementaryGroups=gpio
 
-WorkingDirectory=/home/raspberry/presenca-quarto
+WorkingDirectory=__HOME__/presenca-quarto
 Environment=PYTHONUNBUFFERED=1
-ExecStart=/home/raspberry/presenca-quarto/venv/bin/python /home/raspberry/presenca-quarto/presenca_quarto.py
+ExecStart=__HOME__/presenca-quarto/venv/bin/python __HOME__/presenca-quarto/presenca_quarto.py
 
 Restart=always
 RestartSec=5
