@@ -37,7 +37,7 @@ configurados à parte, pela UART (RX/TX). É uma configuração que fica salva
 na memória do próprio sensor - só precisa aplicar de novo se quiser mudar o
 ajuste, não a cada boot. Duas formas de fazer isso:
 
-- **Pelo painel web** (`https://presenca.quarto.rtavares.net/`): tem um card "Alcance e
+- **Pelo painel web** (`https://presenca-quarto.tavares.nz/`): tem um card "Alcance e
   sensibilidade do sensor" com dois botões - "Carregar atual" (lê os valores
   do sensor) e "Salvar no sensor" (aplica os campos). Nenhum dos dois roda
   sozinho ao abrir a página - cada comando UART para e reinicia a detecção
@@ -195,8 +195,8 @@ e é protegido pelo Cloudflare Access (login antes de chegar ao painel):
 
 | | |
 |---|---|
-| Domínio | `https://presenca.quarto.rtavares.net/` |
-| Rota no túnel (Public Hostname) | `presenca.quarto.rtavares.net` → `HTTP` `localhost:8081` |
+| Domínio | `https://presenca-quarto.tavares.nz/` |
+| Rota no túnel (Public Hostname) | `presenca-quarto.tavares.nz` → `HTTP` `localhost:8081` |
 | Autenticação | aplicação no Cloudflare Access (Zero Trust → Access → Applications) |
 | Certificado | Advanced Certificate Manager (subdomínio de dois níveis não é coberto pelo Universal SSL) |
 
@@ -206,7 +206,7 @@ painel na rede local, troque `HOST_WEB` no `.env` para `0.0.0.0` e reinicie o se
 ## Endereços
 
 No próprio Pi, em `http://127.0.0.1:8081`, ou de fora em
-`https://presenca.quarto.rtavares.net`:
+`https://presenca-quarto.tavares.nz`:
 
 | Caminho | Conteúdo |
 |---|---|
