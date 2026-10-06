@@ -1,5 +1,5 @@
 #!/bin/bash
-# Instala/reinstala o sensor de presenca mmWave (C4001 + Sinric Pro).
+# Instala/reinstala o sensor de presenca mmWave (C4001 + Home Assistant via MQTT).
 # Uso: ./install.sh   (rodar de dentro da pasta clonada do repositorio)
 
 set -e
@@ -23,21 +23,19 @@ sudo apt install -y python3-venv python3-pip python3-lgpio python3-serial python
 if [ ! -f .env ]; then
     cp .env.example .env
     chmod 600 .env
+fi
 
+MQTT_CONFIG="$HOME/.config/mqtt-ha.json"
+if [ ! -f "$MQTT_CONFIG" ]; then
     echo
-    echo "==> Configuracao do Sinric Pro (deixe em branco para pular e editar depois)"
-    read -rp "Device ID: " SINRIC_DEVICE_ID
-    read -rp "App Key: " SINRIC_APP_KEY
-    read -rsp "App Secret: " SINRIC_APP_SECRET
+    echo "==> MQTT do Home Assistant (add-on Mosquitto; usuario definido nas opcoes do add-on)"
+    read -rp "Host do HA [192.168.1.211]: " MQTT_HOST
+    read -rp "Usuario MQTT: " MQTT_USUARIO
+    read -rsp "Senha MQTT: " MQTT_SENHA
     echo
-
-    [ -n "$SINRIC_DEVICE_ID" ] && sed -i "s|^SINRIC_DEVICE_ID=.*|SINRIC_DEVICE_ID=$SINRIC_DEVICE_ID|" .env
-    [ -n "$SINRIC_APP_KEY" ] && sed -i "s|^SINRIC_APP_KEY=.*|SINRIC_APP_KEY=$SINRIC_APP_KEY|" .env
-    [ -n "$SINRIC_APP_SECRET" ] && sed -i "s|^SINRIC_APP_SECRET=.*|SINRIC_APP_SECRET=$SINRIC_APP_SECRET|" .env
-
-    if [ -z "$SINRIC_DEVICE_ID" ] || [ -z "$SINRIC_APP_KEY" ] || [ -z "$SINRIC_APP_SECRET" ]; then
-        echo "==> Algum campo do Sinric ficou em branco - edite depois com: nano $(pwd)/.env"
-    fi
+    mkdir -p "$HOME/.config"
+    ( umask 077; printf '{"host": "%s", "port": 1883, "usuario": "%s", "senha": "%s"}\n' \
+        "${MQTT_HOST:-192.168.1.211}" "$MQTT_USUARIO" "$MQTT_SENHA" > "$MQTT_CONFIG" )
 fi
 
 if [ ! -d venv ]; then

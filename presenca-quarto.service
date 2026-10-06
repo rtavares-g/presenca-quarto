@@ -1,5 +1,5 @@
 [Unit]
-Description=Sensor de presenca mmWave (C4001 + Sinric Pro)
+Description=Sensor de presenca mmWave (C4001 + Home Assistant)
 After=network-online.target
 Wants=network-online.target
 
