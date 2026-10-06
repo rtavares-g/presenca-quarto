@@ -154,8 +154,9 @@ sozinhas, num dispositivo "Presença quarto":
 | `binary_sensor.presenca_quarto` | presença **validada** (use esta nas automações e na Alexa) |
 | `binary_sensor.presenca_quarto_mmwave` | leitura bruta do mmWave (diagnóstico) |
 
-O atributo `validacao` diz como a presença foi confirmada: `kinect`,
-`mmwave` (Kinect fora do ar) ou `pendente`. Os estados vão com *retain*,
+O atributo `validacao` diz como a presença foi confirmada: `kinect`
+(em pé/sentado), `kinect_deitado`, `mmwave` (Kinect fora do ar) ou
+`pendente`. Os estados vão com *retain*,
 então o HA tem o valor certo mesmo depois de reiniciar. Se o Pi cair, as
 entidades ficam indisponíveis.
 
@@ -164,14 +165,17 @@ entidades ficam indisponíveis.
 1. O mmWave detecta alguém: `presenca_quarto_mmwave` liga na hora e a
    presença fica **pendente**.
 2. O serviço `kinect-quarto` confirma uma pessoa (silhueta humana se
-   mexendo): `presenca_quarto` liga.
+   mexendo, ou um volume do tamanho de uma pessoa deitada em relação à
+   referência do quarto vazio): `presenca_quarto` liga.
 3. Daí em diante a presença só desliga quando o mmWave marcar ausência. O
    Kinect perder a pessoa de vista não desliga.
 4. Se o Kinect estiver fora do ar (`~/kinect/estado.json` sem atualizar por
    `KINECT_PARADO_SEG`), a presença usa só o mmWave, para não ficar travada.
 
-Por enquanto o Kinect só confirma quem está no campo de visão dele. Quem
-estiver fora (ou deitado de um jeito que ele não reconhece) fica pendente.
+Por enquanto o Kinect só confirma quem está no campo de visão dele; quem
+estiver fora fica pendente. Para reconhecer alguém deitado, ele precisa
+ter visto o quarto vazio pelo menos uma vez (a referência é guardada depois
+de 2 min sem ninguém).
 
 ## Serviço automático
 

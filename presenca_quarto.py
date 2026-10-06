@@ -116,7 +116,7 @@ class Estado:
         # presença validada (o que vai para o HA): mmWave detectou E o Kinect
         # confirmou uma pessoa desde o início desta detecção
         self.validada = False
-        self.validacao = ""  # "kinect", "mmwave" (Kinect fora do ar), "pendente" ou ""
+        self.validacao = ""  # "kinect", "kinect_deitado", "mmwave" (Kinect fora do ar), "pendente" ou ""
         self.presenca_desde: float | None = None  # time.monotonic() de quando a presença atual começou
         self.segurar_ausencia_ate = 0.0  # time.monotonic() até quando ignorar ausência (sensor reiniciando)
         self.ciclo_em = time.monotonic()  # último giro do ciclo principal (ver vigiar_ciclo)
@@ -482,7 +482,8 @@ class LeitorKinect:
         self.dados: dict | None = None
 
     def situacao(self) -> str:
-        """"pessoa" (Kinect confirmou alguém), "ninguem" ou "parado"
+        """"pessoa" (Kinect confirmou alguém em pé/sentado), "deitado"
+        (volume do tamanho de uma pessoa deitada), "ninguem" ou "parado"
         (serviço do Kinect fora do ar / arquivo velho)."""
         agora = time.monotonic()
         if agora - self.lido_em >= 0.5:
@@ -494,7 +495,9 @@ class LeitorKinect:
         d = self.dados
         if not d or time.time() - float(d.get("salvo_em", 0)) > KINECT_PARADO_SEG:
             return "parado"
-        return "pessoa" if d.get("pessoa") else "ninguem"
+        if d.get("pessoa"):
+            return "pessoa"
+        return "deitado" if d.get("pessoa_deitada") else "ninguem"
 
 kinect = LeitorKinect()
 
@@ -1134,6 +1137,9 @@ async def ciclo(leitor) -> None:
                 if situacao == "pessoa":
                     validacao = "kinect"
                     log("PRESENCA: confirmada pelo Kinect")
+                elif situacao == "deitado":
+                    validacao = "kinect_deitado"
+                    log("PRESENCA: confirmada pelo Kinect (pessoa deitada)")
                 elif (situacao == "parado" and estado.presenca_desde is not None
                       and agora - estado.presenca_desde >= KINECT_PARADO_SEG):
                     validacao = "mmwave"
