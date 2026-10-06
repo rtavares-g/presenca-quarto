@@ -1,9 +1,12 @@
 # Presença Quarto — Raspberry Pi
 
 Sensor de presença mmWave DFRobot **C4001 (25m)** ligado ao Raspberry Pi,
-publicando o estado de presença na **Sinric Pro** (capacidade *Motion
-Sensor*), com um pequeno painel web e console remoto de logs — mesmo
-padrão do [`sensor-pi`](../sensor-pi).
+publicando a presença no **Home Assistant** (MQTT, descoberta automática),
+com um pequeno painel web e console remoto de logs.
+
+Cada nova detecção do mmWave só vira presença no HA depois que o
+[Kinect](../kinect) confirmar uma pessoa (ver
+[Validação pelo Kinect](#validação-pelo-kinect)).
 
 ## Sobre o sensor
 
@@ -103,9 +106,9 @@ cd ~/presenca-quarto
 ```
 
 O `install.sh` instala as dependências do sistema, cria `.env` a
-partir do exemplo e pede no terminal o **Device ID**, **App Key** e **App
-Secret** do Sinric Pro (se deixar algum campo em branco, edite depois com
-`nano .env`), monta o venv e instala o serviço.
+partir do exemplo, pede o **host, usuário e senha do MQTT** do Home
+Assistant (se `~/.config/mqtt-ha.json` ainda não existir), monta o venv e
+instala o serviço.
 
 No final, ele pergunta se você quer configurar HTTPS com Nginx + Let's
 Encrypt. Responda **não**: o acesso externo é feito pelo Cloudflare Tunnel
@@ -123,8 +126,9 @@ mkdir -p ~/presenca-quarto && cd ~/presenca-quarto
 # requirements.txt e presenca-quarto.service para cá
 
 cp .env.example .env
-nano .env                    # preencha SINRIC_DEVICE_ID / SINRIC_APP_KEY / SINRIC_APP_SECRET
-chmod 600 .env                # o arquivo guarda as chaves do Sinric
+nano .env                    # ajustes (opcional)
+# MQTT do HA em ~/.config/mqtt-ha.json:
+#   {"host": "192.168.1.211", "port": 1883, "usuario": "...", "senha": "..."}
 
 python3 -m venv --system-site-packages venv
 ./venv/bin/pip install -r requirements.txt
@@ -139,15 +143,35 @@ Teste:
 Deve aparecer `SENSOR: lendo OUT no GPIO 27...` e, ao se mexer na frente
 do sensor, `PRESENCA: detectada`.
 
-## Criando o dispositivo na Sinric Pro
+## Home Assistant
 
-1. No [portal da Sinric Pro](https://portal.sinric.pro), crie um novo
-   dispositivo do tipo **Motion Sensor**.
-2. Copie o **Device ID** gerado e, na aba de credenciais do app,
-   **App Key** e **App Secret** (a mesma da sua conta, compartilhada com
-   os outros dispositivos Sinric já configurados neste Raspberry Pi).
-3. Coloque os três valores em `.env` (ou informe durante o
-   `install.sh`).
+O HA precisa do add-on **Mosquitto broker** e da integração **MQTT**. O
+usuário do Pi fica nas opções do add-on (`logins`). As entidades aparecem
+sozinhas, num dispositivo "Presença quarto":
+
+| Entidade | O que é |
+|---|---|
+| `binary_sensor.presenca_quarto` | presença **validada** (use esta nas automações e na Alexa) |
+| `binary_sensor.presenca_quarto_mmwave` | leitura bruta do mmWave (diagnóstico) |
+
+O atributo `validacao` diz como a presença foi confirmada: `kinect`,
+`mmwave` (Kinect fora do ar) ou `pendente`. Os estados vão com *retain*,
+então o HA tem o valor certo mesmo depois de reiniciar. Se o Pi cair, as
+entidades ficam indisponíveis.
+
+### Validação pelo Kinect
+
+1. O mmWave detecta alguém: `presenca_quarto_mmwave` liga na hora e a
+   presença fica **pendente**.
+2. O serviço `kinect-quarto` confirma uma pessoa (silhueta humana se
+   mexendo): `presenca_quarto` liga.
+3. Daí em diante a presença só desliga quando o mmWave marcar ausência. O
+   Kinect perder a pessoa de vista não desliga.
+4. Se o Kinect estiver fora do ar (`~/kinect/estado.json` sem atualizar por
+   `KINECT_PARADO_SEG`), a presença usa só o mmWave, para não ficar travada.
+
+Por enquanto o Kinect só confirma quem está no campo de visão dele. Quem
+estiver fora (ou deitado de um jeito que ele não reconhece) fica pendente.
 
 ## Serviço automático
 
@@ -175,7 +199,7 @@ girar, sem precisar reiniciar à mão:
   60s sem avisar, o systemd mata com `SIGABRT` (a pilha de todas as
   threads vai para o journal) e reinicia.
 
-Esses reinícios **não reenviam nada à Sinric** se a presença não mudou: o
+Nesses reinícios a presença e a validação continuam de onde pararam: o
 estado é salvo em `estado.json` e retomado dentro do
 `TOLERANCIA_OFFLINE_SEG` (veja [Ajustes finos](#ajustes-finos)).
 
@@ -211,7 +235,7 @@ No próprio Pi, em `http://127.0.0.1:8081`, ou de fora em
 | Caminho | Conteúdo |
 |---|---|
 | `/` | painel com o estado atual de presença e os ajustes do sensor |
-| `/presenca` | JSON com `presence`, `sinric` e `duracao_seg` (tempo da presença atual) |
+| `/presenca` | JSON com `presence` (mmWave), `validada`, `validacao`, `ha` (MQTT conectado) e `duracao_seg` |
 | `/presenca-ws` | WebSocket que o painel usa para atualizar em tempo real (sem polling) |
 | `/logs` | console remoto ao vivo (WebSocket) |
 | `/sensor-ws` | WebSocket usado pelo painel para ler/salvar alcance e sensibilidade |
@@ -232,12 +256,11 @@ Todas as opções ficam em `.env` (veja `.env.example`):
 - `ATRASO_AUSENCIA_SEG`: quanto tempo sem detecção até marcar "ausente".
   A detecção de presença é imediata; só a ausência tem esse atraso, para
   não ficar piscando quando a pessoa fica parada e o mmWave perde o
-  rastreio por um instante. Aumente se a Sinric estiver alternando
+  rastreio por um instante. Aumente se a presença estiver alternando
   demais; diminua se a resposta parecer lenta.
 - `TOLERANCIA_OFFLINE_SEG` (padrão 300 = 5 min): se o serviço/Pi reiniciar
-  ou a conexão com a Sinric cair e voltar dentro desse tempo, a presença e
-  a contagem continuam de onde pararam e nada é reenviado à Sinric se o
-  estado não mudou. Passou disso, começa do zero e reenvia. O estado fica
+  e voltar dentro desse tempo, a presença, a contagem e a validação
+  continuam de onde pararam. Passou disso, começa do zero. O estado fica
   salvo em `estado.json`. Depois de um reinício (ou de ler/salvar a
   configuração pela UART) a ausência é ignorada por 10s, enquanto o sensor
   volta a detectar.
@@ -246,4 +269,8 @@ Todas as opções ficam em `.env` (veja `.env.example`):
 - `HOST_WEB`: endereço em que o painel escuta (padrão `127.0.0.1`, só o
   próprio Pi - o acesso externo vem pelo Cloudflare Tunnel). Use `0.0.0.0`
   para liberar na rede local.
-- `SINRIC_DEBUG`: ponha `1` para logs detalhados do SDK da Sinric Pro.
+- `KINECT_VALIDAR` (padrão `1`): `0` desliga a validação pelo Kinect (a
+  presença vai direto do mmWave para o HA).
+- `KINECT_PARADO_SEG` (padrão 30): quanto tempo sem notícia do Kinect até
+  usar só o mmWave.
+- `MQTT_CONFIG`: caminho do JSON do MQTT (padrão `~/.config/mqtt-ha.json`).

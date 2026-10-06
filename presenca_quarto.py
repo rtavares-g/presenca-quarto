@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """
-Sensor de presença mmWave (C4001 25m) - Raspberry Pi + Sinric Pro
-Lê o pino digital OUT do sensor e envia eventos de movimento (motion) para
-a Sinric Pro (SDK oficial `sinricpro`), com um pequeno painel web e console
-remoto para depuração.
+Sensor de presença mmWave (C4001 25m) - Raspberry Pi + Home Assistant
+Lê o pino digital OUT do sensor e publica a presença no Home Assistant via
+MQTT (descoberta automática). Cada nova detecção só vira presença depois que
+o Kinect (projeto kinect) confirmar uma pessoa. Tem um pequeno painel web e
+console remoto para depuração.
 """
 
 from __future__ import annotations
@@ -21,7 +22,7 @@ from pathlib import Path
 
 from aiohttp import web
 from gpiozero import InputDevice  # type: ignore[import-untyped]
-from sinricpro import SinricPro, SinricProConfig, SinricProMotionSensor  # type: ignore[import-untyped]
+import paho.mqtt.client as mqtt  # type: ignore[import-untyped]
 
 from DFRobot_C4001 import DFRobot_C4001_UART, EXIST_MODE
 
@@ -77,19 +78,25 @@ ATRASO_AUSENCIA_SEG = env_float("ATRASO_AUSENCIA_SEG", 3.0)
 PORTA_WEB = env_int("PORTA_WEB", 8081)
 HOST_WEB = os.environ.get("HOST_WEB", "127.0.0.1")
 
-# Se o serviço/Pi reiniciar ou a Sinric cair e voltar dentro desse tempo, o
-# estado anterior (presença, contagem e o que a Sinric já sabe) é mantido e
-# nada é reenviado se não tiver mudado. Passou disso, reenvia do zero.
+# Se o serviço/Pi reiniciar e voltar dentro desse tempo, o estado anterior
+# (presença, contagem e validação) é mantido. Passou disso, começa do zero.
 TOLERANCIA_OFFLINE_SEG = env_float("TOLERANCIA_OFFLINE_SEG", 300.0)
 ARQUIVO_ESTADO = Path(os.environ.get("ARQUIVO_ESTADO", RAIZ / "estado.json"))
 # Tempo que o sensor leva para voltar a detectar depois de reiniciar
 # (boot do serviço ou comando UART): ausência nesse intervalo é ignorada.
 SENSOR_AQUECIMENTO_SEG = 10.0
 
-SINRIC_DEVICE_ID = os.environ.get("SINRIC_DEVICE_ID", "")
-SINRIC_APP_KEY = os.environ.get("SINRIC_APP_KEY", "")
-SINRIC_APP_SECRET = os.environ.get("SINRIC_APP_SECRET", "")
-SINRIC_DEBUG = env_bool("SINRIC_DEBUG", False)
+# Home Assistant via MQTT (broker Mosquitto do HA). Arquivo JSON com
+# host/port/usuario/senha, fora do git.
+MQTT_CONFIG = Path(os.environ.get("MQTT_CONFIG", Path.home() / ".config" / "mqtt-ha.json")).expanduser()
+
+# Validação pelo Kinect (projeto kinect): cada nova detecção do mmWave só
+# vira presença no HA depois que o Kinect confirmar uma pessoa. Se o
+# serviço do Kinect estiver parado (estado.json velho) por mais que
+# KINECT_PARADO_SEG, a presença usa só o mmWave para não ficar travada.
+KINECT_VALIDAR = env_bool("KINECT_VALIDAR", True)
+KINECT_ESTADO = Path(os.environ.get("KINECT_ESTADO", Path.home() / "kinect" / "estado.json")).expanduser()
+KINECT_PARADO_SEG = env_float("KINECT_PARADO_SEG", 30.0)
 
 SENSOR_UART_BAUD = env_int("SENSOR_UART_BAUD", 9600)
 
@@ -105,10 +112,12 @@ class Estado:
     """Estado compartilhado da aplicação."""
     def __init__(self) -> None:
         self.presenca = False
-        self.sinric_ok = False
-        self.sinric_confirmado: bool | None = None  # último valor confirmado (enviado com sucesso)
+        self.ha_ok = False
+        # presença validada (o que vai para o HA): mmWave detectou E o Kinect
+        # confirmou uma pessoa desde o início desta detecção
+        self.validada = False
+        self.validacao = ""  # "kinect", "mmwave" (Kinect fora do ar), "pendente" ou ""
         self.presenca_desde: float | None = None  # time.monotonic() de quando a presença atual começou
-        self.sinric_caiu_em: float | None = None  # time.monotonic() de quando a Sinric ficou offline
         self.segurar_ausencia_ate = 0.0  # time.monotonic() até quando ignorar ausência (sensor reiniciando)
         self.ciclo_em = time.monotonic()  # último giro do ciclo principal (ver vigiar_ciclo)
 
@@ -125,7 +134,8 @@ def salvar_estado() -> None:
     dados = {
         "presenca": estado.presenca,
         "presenca_desde": desde,
-        "sinric_confirmado": estado.sinric_confirmado,
+        "presenca_validada": estado.presenca and estado.validada,
+        "validacao": estado.validacao,
         "salvo_em": agora,
     }
     try:
@@ -137,7 +147,7 @@ def salvar_estado() -> None:
 
 def restaurar_estado() -> None:
     """Se o último estado salvo tiver menos de TOLERANCIA_OFFLINE_SEG,
-    retoma presença, contagem e confirmação da Sinric de onde parou."""
+    retoma presença, contagem e validação de onde parou."""
     try:
         dados = json.loads(ARQUIVO_ESTADO.read_text(encoding="utf-8"))
         salvo_em = float(dados["salvo_em"])
@@ -161,14 +171,12 @@ def restaurar_estado() -> None:
         estado.presenca_desde = agora_mono - (time.time() - float(desde))
     elif estado.presenca:
         estado.presenca_desde = agora_mono
-    confirmado = dados.get("sinric_confirmado")
-    estado.sinric_confirmado = confirmado if isinstance(confirmado, bool) else None
-    # conta o tempo parado como tempo offline da Sinric (ver Sinric._ao_conectar)
-    estado.sinric_caiu_em = agora_mono - offline
+    estado.validada = estado.presenca and bool(dados.get("presenca_validada"))
+    estado.validacao = (str(dados.get("validacao") or "") or ("" if estado.validada else "pendente")) if estado.presenca else ""
     estado.segurar_ausencia_ate = agora_mono + SENSOR_AQUECIMENTO_SEG
     log(
         f"ESTADO: retomado após {offline:.0f}s parado "
-        f"(presença {'SIM' if estado.presenca else 'NÃO'}, Sinric não será reenviada se nada mudar)"
+        f"(presença {'SIM' if estado.presenca else 'NÃO'}, validação {estado.validacao or '-'})"
     )
 
 class Console:
@@ -361,89 +369,134 @@ sensor_uart = SensorUART()
 sensor_uart_lock = asyncio.Lock()  # evita duas abas mexendo na UART ao mesmo tempo
 
 # =========================================================================
-# SINRIC PRO (capacidade Motion Sensor)
+# HOME ASSISTANT (MQTT com descoberta automática)
 # =========================================================================
 
-class Sinric:
-    """Publica o estado de presença na Sinric Pro via SDK oficial (sinricpro)."""
+class HomeAssistant:
+    """Publica a presença no Home Assistant pelo broker MQTT.
+
+    Entidades criadas sozinhas no HA (descoberta MQTT), num dispositivo
+    "Presença quarto":
+    - binary_sensor.presenca_quarto: presença validada pelo Kinect
+    - binary_sensor.presenca_quarto_mmwave: leitura bruta do mmWave
+    Os estados vão com retain, então o HA tem o valor certo mesmo depois de
+    reiniciar. Se o Pi cair, o "last will" marca as entidades indisponíveis."""
+    BASE = "presenca-quarto"
+    DESCOBERTA = "homeassistant/binary_sensor/presenca_quarto"
+
     def __init__(self) -> None:
-        self.sensor: SinricProMotionSensor | None = None
+        self.cliente: mqtt.Client | None = None
+        self.publicado: dict[str, str] = {}
+        self.loop: asyncio.AbstractEventLoop | None = None
 
-    @property
-    def configurado(self) -> bool:
-        return bool(SINRIC_DEVICE_ID and SINRIC_APP_KEY and SINRIC_APP_SECRET)
-
-    async def iniciar(self) -> None:
-        if not self.configurado:
-            log("SINRIC: credenciais não configuradas")
-            return
-
-        self.sensor = SinricProMotionSensor(SINRIC_DEVICE_ID)
-
-        sinric_pro = SinricPro.get_instance()
-        sinric_pro.on_connected(self._ao_conectar)
-        sinric_pro.on_disconnected(self._ao_desconectar)
-        sinric_pro.add(self.sensor)
-
-        log("SINRIC: conectando...")
-        await sinric_pro.begin(SinricProConfig(
-            app_key=SINRIC_APP_KEY,
-            app_secret=SINRIC_APP_SECRET,
-            debug=SINRIC_DEBUG,
-        ))
-
-    def _ao_conectar(self) -> None:
-        estado.sinric_ok = True
-        caiu_em, estado.sinric_caiu_em = estado.sinric_caiu_em, None
-        offline = None if caiu_em is None else time.monotonic() - caiu_em
-        if offline is not None and offline <= TOLERANCIA_OFFLINE_SEG:
-            # voltou rápido: a Sinric ainda tem o último valor confirmado, o
-            # ciclo principal só reenvia se a presença mudou nesse meio tempo
-            log(f"SINRIC: conectado (offline por {offline:.0f}s, mantendo estado)")
-        else:
-            # primeira conexão ou offline demais: invalida a confirmação e o
-            # ciclo principal reenvia o estado atual sozinho no próximo giro
-            # (evita disputar o rate limit de eventos com uma detecção real
-            # que aconteça no mesmo instante)
-            log("SINRIC: conectado")
-            estado.sinric_confirmado = None
-        notificar_painel()
-
-    def _ao_desconectar(self) -> None:
-        if estado.sinric_ok:
-            estado.sinric_caiu_em = time.monotonic()
-        estado.sinric_ok = False
-        log("SINRIC: desconectado")
-        notificar_painel()
-
-    async def enviar_presenca(self, ativo: bool) -> bool:
-        if not self.sensor:
-            return False
+    def iniciar(self) -> None:
         try:
-            return await self.sensor.send_motion_event(ativo)
-        except Exception as erro:
-            log(f"SINRIC: falha ao enviar ({erro})")
-            return False
+            cfg = json.loads(MQTT_CONFIG.read_text(encoding="utf-8"))
+        except (OSError, ValueError) as e:
+            log(f"HA: sem configuração do MQTT em {MQTT_CONFIG} ({e})")
+            return
+        self.loop = asyncio.get_running_loop()
+        c = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2, client_id="presenca-quarto")
+        c.username_pw_set(cfg["usuario"], cfg["senha"])
+        c.will_set(f"{self.BASE}/disponivel", "offline", qos=1, retain=True)
+        c.on_connect = self._ao_conectar
+        c.on_disconnect = self._ao_desconectar
+        c.reconnect_delay_set(1, 30)
+        log(f"HA: conectando ao MQTT {cfg['host']}:{cfg.get('port', 1883)}...")
+        c.connect_async(cfg["host"], int(cfg.get("port", 1883)), keepalive=30)
+        c.loop_start()
+        self.cliente = c
 
-    async def parar(self) -> None:
-        if self.sensor:
-            await SinricPro.get_instance().stop()
+    def _avisar_painel(self) -> None:
+        if self.loop:
+            self.loop.call_soon_threadsafe(notificar_painel)
 
-    async def vigiar_reconexao(self) -> None:
-        """Contorna um bug do SDK: se a 1ª tentativa de reconexão falhar,
-        ele desiste para sempre em vez de reagendar outra (_reconnect() só
-        tenta uma vez e só loga "Reconnection failed"). Aqui forçamos uma
-        nova tentativa periodicamente enquanto a conexão estiver caída."""
-        while True:
-            await asyncio.sleep(30)
-            if not self.configurado or estado.sinric_ok:
-                continue
-            sp = SinricPro.get_instance()
-            if sp.websocket and not sp.websocket.is_connected():
-                log("SINRIC: sem conexão há um tempo, forçando nova tentativa")
-                sp.websocket.schedule_reconnect()
+    def _ao_conectar(self, cliente, _userdata, _flags, motivo, _props) -> None:
+        if motivo.is_failure:
+            log(f"HA: MQTT recusou a conexão ({motivo})")
+            return
+        dispositivo = {
+            "identifiers": ["presenca-quarto"],
+            "name": "Presença quarto",
+            "manufacturer": "DFRobot C4001 + Kinect",
+            "model": "mmWave validado pelo Kinect",
+        }
+        disponivel = f"{self.BASE}/disponivel"
+        configs = {
+            f"{self.DESCOBERTA}/config": {
+                "name": None,
+                "unique_id": "presenca_quarto",
+                "default_entity_id": "binary_sensor.presenca_quarto",
+                "device_class": "occupancy",
+                "state_topic": f"{self.BASE}/presenca",
+                "json_attributes_topic": f"{self.BASE}/atributos",
+                "availability_topic": disponivel,
+                "device": dispositivo,
+            },
+            f"{self.DESCOBERTA}_mmwave/config": {
+                "name": "mmWave",
+                "unique_id": "presenca_quarto_mmwave",
+                "default_entity_id": "binary_sensor.presenca_quarto_mmwave",
+                "device_class": "motion",
+                "state_topic": f"{self.BASE}/mmwave",
+                "availability_topic": disponivel,
+                "entity_category": "diagnostic",
+                "device": dispositivo,
+            },
+        }
+        for topico, cfg in configs.items():
+            cliente.publish(topico, json.dumps(cfg), qos=1, retain=True)
+        cliente.publish(disponivel, "online", qos=1, retain=True)
+        self.publicado.clear()  # o ciclo principal republica tudo no próximo giro
+        estado.ha_ok = True
+        log("HA: conectado")
+        self._avisar_painel()
 
-sinric = Sinric()
+    def _ao_desconectar(self, _cliente, _userdata, _flags, motivo, _props) -> None:
+        if estado.ha_ok:
+            log(f"HA: desconectado do MQTT ({motivo}), tentando de novo...")
+        estado.ha_ok = False
+        self._avisar_painel()
+
+    def publicar(self, topico: str, valor: str) -> None:
+        """Publica só quando muda (ou depois de reconectar)."""
+        if not self.cliente or not estado.ha_ok or self.publicado.get(topico) == valor:
+            return
+        info = self.cliente.publish(f"{self.BASE}/{topico}", valor, qos=1, retain=True)
+        if info.rc == mqtt.MQTT_ERR_SUCCESS:
+            self.publicado[topico] = valor
+
+    def parar(self) -> None:
+        if self.cliente:
+            self.cliente.publish(f"{self.BASE}/disponivel", "offline", qos=1, retain=True).wait_for_publish(2)
+            self.cliente.loop_stop()
+            self.cliente.disconnect()
+
+ha = HomeAssistant()
+
+
+class LeitorKinect:
+    """Lê o estado.json do serviço kinect-quarto."""
+    def __init__(self) -> None:
+        self.lido_em = 0.0
+        self.dados: dict | None = None
+
+    def situacao(self) -> str:
+        """"pessoa" (Kinect confirmou alguém), "ninguem" ou "parado"
+        (serviço do Kinect fora do ar / arquivo velho)."""
+        agora = time.monotonic()
+        if agora - self.lido_em >= 0.5:
+            self.lido_em = agora
+            try:
+                self.dados = json.loads(KINECT_ESTADO.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                self.dados = None
+        d = self.dados
+        if not d or time.time() - float(d.get("salvo_em", 0)) > KINECT_PARADO_SEG:
+            return "parado"
+        return "pessoa" if d.get("pessoa") else "ninguem"
+
+kinect = LeitorKinect()
 
 # =========================================================================
 # PRESENCA - estado em JSON e broadcast em tempo real (WebSocket)
@@ -457,7 +510,9 @@ def estado_presenca_json() -> dict:
         duracao_seg = round(time.monotonic() - estado.presenca_desde)
     return {
         "presence": estado.presenca,
-        "sinric": estado.sinric_ok,
+        "ha": estado.ha_ok,
+        "validada": estado.presenca and estado.validada,
+        "validacao": estado.validacao,
         "duracao_seg": duracao_seg,
     }
 
@@ -1022,14 +1077,14 @@ async def ciclo(leitor) -> None:
     de ficar continuamente ausente por 'ATRASO_AUSENCIA_SEG' (evita flicker
     quando a pessoa fica parada e o mmWave perde o rastreio por instantes).
 
-    O envio à Sinric é conferido a cada ciclo (não só na transição): se o
-    último envio falhou (rate limit do SDK, reconexão etc.) ele é repetido
-    até ser confirmado, para nenhuma mudança de estado ficar perdida.
+    Cada nova detecção só vira presença no Home Assistant depois que o
+    Kinect confirmar uma pessoa (ver HomeAssistant / LeitorKinect). O que é
+    publicado é conferido a cada ciclo, então nada fica perdido se o MQTT
+    cair e voltar.
 
     O estado vai para disco a cada mudança e periodicamente, para um
     reinício rápido retomar de onde parou (ver restaurar_estado)."""
     ausente_desde: float | None = None
-    falha_avisada = False
     salvo_em = 0.0
 
     while True:
@@ -1050,7 +1105,9 @@ async def ciclo(leitor) -> None:
             if not estado.presenca:
                 estado.presenca = True
                 estado.presenca_desde = agora
-                log("PRESENCA: detectada")
+                estado.validada = False
+                estado.validacao = "pendente" if KINECT_VALIDAR else ""
+                log("PRESENCA: detectada pelo mmWave" + (", aguardando o Kinect" if KINECT_VALIDAR else ""))
                 salvar_estado()
                 notificar_painel()
         else:
@@ -1062,18 +1119,34 @@ async def ciclo(leitor) -> None:
                 elif agora - ausente_desde >= ATRASO_AUSENCIA_SEG:
                     estado.presenca = False
                     estado.presenca_desde = None
+                    estado.validada = False
+                    estado.validacao = ""
                     log(f"PRESENCA: ausente (sem detecção por {ATRASO_AUSENCIA_SEG:.0f}s)")
                     salvar_estado()
                     notificar_painel()
 
-        if estado.sinric_confirmado != estado.presenca:
-            if await sinric.enviar_presenca(estado.presenca):
-                estado.sinric_confirmado = estado.presenca
-                falha_avisada = False
+        if estado.presenca and not estado.validada:
+            validacao = None
+            if not KINECT_VALIDAR:
+                validacao = "mmwave"
+            else:
+                situacao = kinect.situacao()
+                if situacao == "pessoa":
+                    validacao = "kinect"
+                    log("PRESENCA: confirmada pelo Kinect")
+                elif (situacao == "parado" and estado.presenca_desde is not None
+                      and agora - estado.presenca_desde >= KINECT_PARADO_SEG):
+                    validacao = "mmwave"
+                    log("PRESENCA: Kinect fora do ar, usando só o mmWave")
+            if validacao:
+                estado.validada = True
+                estado.validacao = validacao
                 salvar_estado()
-            elif not falha_avisada:
-                log("SINRIC: evento não enviado (desconectado ou rate limit), tentando de novo...")
-                falha_avisada = True
+                notificar_painel()
+
+        ha.publicar("mmwave", "ON" if estado.presenca else "OFF")
+        ha.publicar("presenca", "ON" if estado.presenca and estado.validada else "OFF")
+        ha.publicar("atributos", json.dumps({"validacao": estado.validacao or None}))
 
         # marca "ainda rodando" para o restaurar_estado medir o tempo parado
         if agora - salvo_em >= 30:
@@ -1091,9 +1164,8 @@ async def principal(simular: bool) -> None:
     except Exception:
         pass
 
-    await sinric.iniciar()
+    ha.iniciar()
     runner = await subir_servidor()
-    vigia = asyncio.create_task(sinric.vigiar_reconexao())
     estado.ciclo_em = time.monotonic()
     tarefa_ciclo = asyncio.create_task(ciclo(leitor))
     vigia_ciclo = asyncio.create_task(vigiar_ciclo(tarefa_ciclo))
@@ -1104,11 +1176,10 @@ async def principal(simular: bool) -> None:
     except KeyboardInterrupt:
         log("Encerrando...")
     finally:
-        vigia.cancel()
         vigia_ciclo.cancel()
         salvar_estado()
         await runner.cleanup()
-        await sinric.parar()
+        ha.parar()
 
 # =========================================================================
 
